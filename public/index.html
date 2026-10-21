@@ -41,14 +41,22 @@ small{color:#aab4c0}.status{overflow-wrap:anywhere}
     logEl.scrollTop = logEl.scrollHeight;
   }
   function status(s) { statusEl.textContent = s; log('STATUS', s); }
+  function redactText(value) {
+    return String(value == null ? '' : value).replace(/https?:\\/\\/[^\\s"'<>]+/gi, raw => {
+      try { const u = new URL(raw); return u.origin + u.pathname + (u.search ? '?[redacted]' : ''); }
+      catch (_) { return '[url-redacted]'; }
+    });
+  }
   function describeError(e) {
     if (!e) return {};
-    const out = {name:e.name || '', message:e.message || String(e), code:e.code, source:e.source};
+    const out = {name:redactText(e.name || ''), message:redactText(e.message || String(e)), code:e.code};
+    if (e.source) out.source = typeof e.source === 'string' ? safeUrl(e.source) : redactText(e.source);
     try {
       for (const key of Object.keys(e)) {
         if (!(key in out)) {
           const value = e[key];
-          if (value === null || ['string','number','boolean'].includes(typeof value)) out[key] = value;
+          if (value === null || ['number','boolean'].includes(typeof value)) out[key] = value;
+          else if (typeof value === 'string') out[key] = redactText(value);
         }
       }
     } catch (_) {}
@@ -358,7 +366,7 @@ small{color:#aab4c0}.status{overflow-wrap:anywhere}
       player.addEventListener(IVSPlayer.PlayerEventType.ERROR, e => {
         let detail = describeError(e);
         try {
-          detail = {...detail, enumerableKeys:Object.keys(e || {}), json:(() => { try { return JSON.stringify(e); } catch (_) { return '[not serializable]'; } })()};
+          detail = {...detail, enumerableKeys:Object.keys(e || {}), json:(() => { try { return redactText(JSON.stringify(e)); } catch (_) { return '[not serializable]'; } })()};
         } catch (_) {}
         log('PLAYER_ERROR', {runId:diag.runId, ...detail, media:mediaSnapshot()});
         logMediaSnapshot('immediately-after-player-error');
@@ -431,7 +439,7 @@ small{color:#aab4c0}.status{overflow-wrap:anywhere}
     catch(e) { log('CLIPBOARD_ERROR', describeError(e)); status('Не удалось скопировать автоматически — выдели лог вручную.'); }
   });
   // Bump this identifier for every diagnostic-page deployment so mobile logs reveal stale builds.
-  log('SITE_VERSION', {version:'2026.10.22-r5', build:'deep-media-network-buffer-diagnostics'});
+  log('SITE_VERSION', {version:'2026.10.22-r6', build:'deep-media-network-buffer-diagnostics-redacted-errors'});
   checkEnvironment();
   startResourceDiagnostics();
   if ('serviceWorker' in navigator) {
