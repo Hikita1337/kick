@@ -130,7 +130,7 @@ class Handler(SimpleHTTPRequestHandler):
                 self.send_json(400, {"error": "unsupported_playback_url"})
                 return
             if (not isinstance(ua, str) or not ua or len(ua) > 1024
-                    or "\\r" in ua or "\\n" in ua):
+                    or "\r" in ua or "\n" in ua):
                 self.send_json(400, {"error": "invalid_user_agent"})
                 return
             request = Request(master, headers={
@@ -152,9 +152,9 @@ class Handler(SimpleHTTPRequestHandler):
                 if not uri:
                     continue
                 attrs = line.split(":", 1)[1]
-                resolution = re.search(r"(?:^|,)RESOLUTION=(\\d+)x(\\d+)", attrs)
-                bandwidth = re.search(r"(?:^|,)BANDWIDTH=(\\d+)", attrs)
-                fps = re.search(r"(?:^|,)FRAME-RATE=([\\d.]+)", attrs)
+                resolution = re.search(r"(?:^|,)RESOLUTION=(\d+)x(\d+)", attrs)
+                bandwidth = re.search(r"(?:^|,)BANDWIDTH=(\d+)", attrs)
+                fps = re.search(r"(?:^|,)FRAME-RATE=([\d.]+)", attrs)
                 child = urljoin(master, uri)
                 cp = urlsplit(child)
                 host = (cp.hostname or "").lower()
