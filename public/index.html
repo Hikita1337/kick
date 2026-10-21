@@ -58,7 +58,7 @@ small{color:#aab4c0}.status{overflow-wrap:anywhere}
         headers:{'Accept':'application/vnd.apple.mpegurl, application/x-mpegURL, */*'}
       });
       const sample = (await response.text()).slice(0,16384);
-      const lines = sample.split(/\\r?\\n/).map(line => line.trim()).filter(Boolean);
+      const lines = sample.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
       const segmentLine = lines.find(line => !line.startsWith('#'));
       const result = {
         status:response.status,
