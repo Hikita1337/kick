@@ -18,7 +18,7 @@ small{color:#aab4c0}.status{overflow-wrap:anywhere}
 </head>
 <body>
 <h1>Amazon IVS Player — тест</h1>
-<p>Сервер сам получает актуальный playback URL публичной трансляции Kick и передаёт его официальному IVS Player. Работает на iPhone, Android и ПК.</p>
+<p>Страница получает актуальный playback URL Kick, сервер разбирает только метаданные master playlist и выбирает вариант качества. Сам поток и сегменты идут напрямую на устройство через официальный Amazon IVS Player.</p>
 <div class="card">
 <label for="channel">Имя канала Kick</label>
 <input id="channel" type="text" value="good-girl21" inputmode="text" autocapitalize="none" autocomplete="off" spellcheck="false" placeholder="например, good-girl21">
