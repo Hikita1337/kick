@@ -220,6 +220,8 @@ small{color:#aab4c0}.status{overflow-wrap:anywhere}
     try { await navigator.clipboard.writeText(logEl.textContent); status('Лог скопирован.'); }
     catch(e) { log('CLIPBOARD_ERROR', describeError(e)); status('Не удалось скопировать автоматически — выдели лог вручную.'); }
   });
+  // Bump this identifier for every diagnostic-page deployment so mobile logs reveal stale builds.
+  log('SITE_VERSION', {version:'ivs-diag-20261022-r2', build:'browser-playlist-probe'});
   checkEnvironment();
   if ('serviceWorker' in navigator) {
     navigator.serviceWorker.addEventListener('controllerchange', () => log('SW_CONTROLLER_CHANGE', {controlled:!!navigator.serviceWorker.controller}));
