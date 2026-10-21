@@ -7,7 +7,7 @@
 <title>Kick Early Prefetch Player · Lab</title>
 <style>
 :root{color-scheme:dark;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#101318;color:#f3f5f7}
-*{box-sizing:border-box}body{margin:0;padding:14px 12px calc(24px + env(safe-area-inset-bottom));max-width:900px;margin-inline:auto}
+*{box-sizing:border-box}body{margin:0;padding:14px 12px calc(24px + env(safe-area-inset-bottom));max-width:1500px;margin-inline:auto}.comparison{display:grid;grid-template-columns:1fr 1fr;gap:12px}.comparison iframe{width:100%;aspect-ratio:16/9;border:0;border-radius:10px;background:#000}.pane-title{font-size:14px;color:#bac2cc;margin:0 0 6px}@media(max-width:760px){.comparison{grid-template-columns:1fr}}
 h1{font-size:23px;margin:5px 0 8px}p{color:#bac2cc;line-height:1.45}.card{background:#1a2028;border:1px solid #303946;border-radius:14px;padding:13px;margin:12px 0}
 input,button{font:inherit;border-radius:10px;width:100%;padding:12px;border:1px solid #3b4654;margin:5px 0}
 input{background:#0f1319;color:#fff}button{background:#e6edf5;color:#101318;font-weight:700}button.secondary{background:#28313d;color:#f3f5f7}
@@ -21,16 +21,16 @@ small{color:#aab4c0}.warn{color:#ffcc80}
 <div class="card">
 <label for="channel">Канал Kick</label><input id="channel" value="good-girl21" autocapitalize="none" autocomplete="off" spellcheck="false">
 <button id="start">Запустить собственный загрузчик</button><button id="stop" class="secondary">Остановить</button>
-<video id="video" controls playsinline webkit-playsinline></video>
+<div class="comparison"><div><p class="pane-title">Официальный Kick (тот же канал)</p><iframe id="kickFrame" title="Официальный Kick" allow="autoplay; fullscreen; picture-in-picture" allowfullscreen></iframe></div><div><p class="pane-title">Наш экспериментальный плеер</p><video id="video" controls playsinline webkit-playsinline></video></div></div>
 <p id="status">Готов. Запуск может потребовать нажатия Play из-за правил автозапуска Safari.</p>
 <small>Видеоданные идут напрямую из CDN в браузер. Сервер не ретранслирует медиабайты. Подписанные URL не выводятся в лог.</small>
 </div>
-<div class="card"><strong>Сравнение задержки · метки события</strong><p>Когда одно и то же заметное событие появится в соответствующем видео, нажми кнопку. Сравнение приблизительное: учитывает скорость реакции человека.</p><button id="markKick" class="secondary">Метка: событие появилось в Kick</button><button id="markOurs" class="secondary">Метка: событие появилось у нас</button><p id="markResult">Пока нет парных меток.</p></div><div class="card"><strong>Диагностика</strong><button id="copy" class="secondary">Скопировать лог</button><button id="clear" class="secondary">Очистить лог</button><pre id="log"></pre></div>
+<div class="card"><strong>Автоматический тест</strong><p>Таймер и диагностические снимки пишутся автоматически. Чтобы сохранить одновременную запись экрана с обоими видео, нажмите «Начать запись экрана» и выберите весь экран. В конце остановите запись и скачайте видео; лог копируется отдельно одной кнопкой.</p><p id="testClock">Тест не запущен.</p><button id="recordScreen">Начать запись экрана (видео + таймер)</button><button id="stopRecord" class="secondary">Остановить запись</button><a id="downloadRecording" style="display:none;color:#fff" download="kick-comparison-test.webm">Скачать запись сравнения</a><p id="recordStatus">Запись экрана не запущена.</p></div><div class="card"><strong>Диагностика</strong><button id="copy" class="secondary">Скопировать лог</button><button id="clear" class="secondary">Очистить лог</button><pre id="log"></pre></div>
 <script src="https://cdn.jsdelivr.net/npm/mpegts.js@1.8.0/dist/mpegts.min.js"></script>
 <script>
 (() => {
  const $=id=>document.getElementById(id), video=$('video'), logEl=$('log');
- let player=null, loaderInstance=null, runId=0, startedAt=0, firstData=false, firstFrame=false, snapshotTimer=null, lastFrameCallbackAt=null, lastFrameMediaTime=null, lastFrameGapLogAt=0, kickMark=null, oursMark=null;
+ let player=null, loaderInstance=null, runId=0, startedAt=0, firstData=false, firstFrame=false, snapshotTimer=null, lastFrameCallbackAt=null, lastFrameMediaTime=null, lastFrameGapLogAt=0, recordingStream=null, mediaRecorder=null, recordedChunks=[], clockTimer=null, testStartedWall=null;
  function log(name,data){logEl.textContent+=new Date().toLocaleTimeString()+' '+name+(data===undefined?'':' '+JSON.stringify(data))+'\n';logEl.scrollTop=logEl.scrollHeight}
  function status(s){$('status').textContent=s;log('STATUS',s)}
  function err(e){return {name:e&&e.name||'Error',message:String(e&&e.message||e).replace(/https?:\/\/[^\s"'<>]+/gi,'[url-redacted]').slice(0,180)}}
@@ -218,22 +218,32 @@ small{color:#aab4c0}.warn{color:#ffcc80}
      snapshotTimer=setInterval(()=>{if(runId===thisRun&&player)reportBuffer()},5000);
    }catch(e){log('START_ERROR',err(e));status('Не удалось запустить. Смотри лог.')}
  }
- function markEvent(side){
-   const mark={side,wallClock:new Date().toISOString(),performanceMs:Math.round(performance.now()),videoCurrentTime:Number(video.currentTime.toFixed(3)),readyState:video.readyState,paused:video.paused};
-   log('COMPARISON_EVENT_MARK',mark);
-   if(side==='kick')kickMark=mark;else oursMark=mark;
-   if(kickMark&&oursMark){
-     const delta=oursMark.performanceMs-kickMark.performanceMs;
-     const result=delta<0?'Наш плеер отмечен раньше Kick примерно на '+Math.abs(delta)+' мс':delta>0?'Наш плеер отмечен позже Kick примерно на '+delta+' мс':'Обе метки в одну миллисекунду';
-     $('markResult').textContent=result+' (ручная оценка, включая реакцию человека).';
-     log('COMPARISON_EVENT_RESULT',{kickWallClock:kickMark.wallClock,oursWallClock:oursMark.wallClock,oursMinusKickMs:delta,interpretation:result+'; ручная оценка, не точное измерение live latency'});
-     kickMark=null;oursMark=null;
-   }else{
-     $('markResult').textContent='Ожидается метка второго плеера. Для следующего события нажимайте обе кнопки заново.';
-   }
+ function updateTestClock(){
+   if(!testStartedWall){$('testClock').textContent='Тест не запущен.';return}
+   const ms=Date.now()-testStartedWall, mins=Math.floor(ms/60000), secs=Math.floor(ms/1000)%60, milli=ms%1000;
+   $('testClock').textContent='Длительность: '+String(mins).padStart(2,'0')+':'+String(secs).padStart(2,'0')+'.'+String(milli).padStart(3,'0');
  }
- $('markKick').addEventListener('click',()=>markEvent('kick'));$('markOurs').addEventListener('click',()=>markEvent('ours'));
- $('start').addEventListener('click',start);$('stop').addEventListener('click',stop);
+ function startScreenRecording(){
+   if(!navigator.mediaDevices||!navigator.mediaDevices.getDisplayMedia||!window.MediaRecorder){status('Запись экрана не поддерживается этим браузером. Используйте запись экрана Windows/macOS.');log('SCREEN_RECORDING_UNSUPPORTED',{getDisplayMedia:!!(navigator.mediaDevices&&navigator.mediaDevices.getDisplayMedia),MediaRecorder:!!window.MediaRecorder});return}
+   navigator.mediaDevices.getDisplayMedia({video:{frameRate:30},audio:false}).then(stream=>{
+     recordingStream=stream;recordedChunks=[];testStartedWall=Date.now();updateTestClock();clockTimer=setInterval(updateTestClock,50);
+     try{mediaRecorder=new MediaRecorder(stream,{mimeType:MediaRecorder.isTypeSupported('video/webm;codecs=vp9')?'video/webm;codecs=vp9':'video/webm'})}catch(e){mediaRecorder=new MediaRecorder(stream)}
+     mediaRecorder.ondataavailable=e=>{if(e.data&&e.data.size)recordedChunks.push(e.data)};
+     mediaRecorder.onstop=()=>{
+       const blob=new Blob(recordedChunks,{type:mediaRecorder.mimeType||'video/webm'}),url=URL.createObjectURL(blob),a=$('downloadRecording');
+       a.href=url;a.style.display='inline-block';a.textContent='Скачать запись сравнения ('+Math.round(blob.size/1024/1024)+' МБ)';
+       $('recordStatus').textContent='Запись готова. Скачайте видео и отдельно скопируйте лог.';
+       log('SCREEN_RECORDING_SAVED',{durationMs:Date.now()-testStartedWall,bytes:blob.size,mimeType:blob.type});
+       try{recordingStream.getTracks().forEach(t=>t.stop())}catch(_){}
+     };
+     stream.getVideoTracks()[0].addEventListener('ended',()=>{if(mediaRecorder&&mediaRecorder.state!=='inactive')mediaRecorder.stop()});
+     mediaRecorder.start(1000);$('recordStatus').textContent='Записывается весь выбранный экран. Разместите Kick и наш плеер рядом.';
+     log('SCREEN_RECORDING_STARTED',{wallClock:new Date().toISOString(),capture:'user-selected display',fps:30});
+   }).catch(e=>{log('SCREEN_RECORDING_ERROR',err(e));$('recordStatus').textContent='Запись не началась: '+String(e.message||e)});
+ }
+ function stopScreenRecording(){try{if(mediaRecorder&&mediaRecorder.state!=='inactive')mediaRecorder.stop()}catch(e){log('SCREEN_RECORDING_STOP_ERROR',err(e))}if(clockTimer){clearInterval(clockTimer);clockTimer=null}updateTestClock()}
+ $('recordScreen').addEventListener('click',startScreenRecording);$('stopRecord').addEventListener('click',stopScreenRecording);
+ $('start').addEventListener('click',()=>{const channel=$('channel').value.trim();$('kickFrame').src='https://player.kick.com/'+encodeURIComponent(channel)+'?autoplay=true&muted=true';start()});$('stop').addEventListener('click',stop);
  $('clear').addEventListener('click',()=>logEl.textContent='');
  $('copy').addEventListener('click',async()=>{try{await navigator.clipboard.writeText(logEl.textContent);status('Лог скопирован')}catch(e){status('Не удалось скопировать; выдели лог вручную')}});
  log('LAB_READY',{origin:location.origin,secureContext:isSecureContext,userAgent:navigator.userAgent});
