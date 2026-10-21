@@ -18,11 +18,11 @@ small{color:#aab4c0}.status{overflow-wrap:anywhere}
 </head>
 <body>
 <h1>Amazon IVS Player — тест</h1>
-<p>Проверка Service Worker и запуска видео в Safari на iPhone, Android и ПК. Используй только playback URL, который тебе разрешено открывать.</p>
+<p>Сервер сам получает актуальный playback URL публичной трансляции Kick и передаёт его официальному IVS Player. Работает на iPhone, Android и ПК.</p>
 <div class="card">
-<label for="playback">HLS playback URL (.m3u8)</label>
-<input id="playback" type="url" inputmode="url" autocomplete="off" placeholder="https://…/index.m3u8">
-<button id="start">Запустить плеер</button>
+<label for="channel">Имя канала Kick</label>
+<input id="channel" type="text" value="Serpens2025" inputmode="text" autocapitalize="none" autocomplete="off" spellcheck="false" placeholder="например, Serpens2025">
+<button id="start">Получить трансляцию и запустить</button>
 <button id="stop" class="secondary">Остановить</button>
 <button id="check" class="secondary">Проверить Service Worker</button>
 <video id="video" controls playsinline webkit-playsinline crossorigin="anonymous"></video>
@@ -80,12 +80,33 @@ small{color:#aab4c0}.status{overflow-wrap:anywhere}
     log('PLAYER_STOPPED');
   }
   async function startPlayer() {
-    const url = $('playback').value.trim();
-    if (!url) { status('Сначала вставь HLS playback URL.'); return; }
-    try { new URL(url); } catch (_) { status('URL выглядит некорректно.'); return; }
+    const channel = $('channel').value.trim();
+    if (!/^[A-Za-z0-9_]{1,50}$/.test(channel)) {
+      status('Введи корректное имя канала Kick без ссылки.');
+      return;
+    }
     stopPlayer();
-    startAt = performance.now(); firstPlayingLogged = false;
-    status('Загружаю Amazon IVS Player SDK…');
+    startAt = performance.now();
+    firstPlayingLogged = false;
+    status('Запрашиваю актуальный адрес трансляции у сервера…');
+
+    let url;
+    try {
+      const response = await fetch('/api/playback-url?channel=' + encodeURIComponent(channel), {cache:'no-store'});
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || ('HTTP ' + response.status));
+      url = data.playback_url;
+      if (typeof url !== 'string' || !url.startsWith('https://')) {
+        throw new Error('Сервер не вернул корректный HTTPS playback URL.');
+      }
+      log('PLAYBACK_URL_READY', {channel:data.channel || channel, live:data.live, host:new URL(url).host});
+    } catch (e) {
+      log('PLAYBACK_URL_ERROR', {message:e.message || 'Не удалось получить URL'});
+      status('Не удалось получить трансляцию: ' + (e.message || 'ошибка сервера'));
+      return;
+    }
+
+    status('Адрес получен. Загружаю Amazon IVS Player SDK…');
     if (!window.IVSPlayer) {
       log('SDK_MISSING');
       status('SDK не загрузился. Проверь соединение/CDN и обнови страницу.');
@@ -111,7 +132,7 @@ small{color:#aab4c0}.status{overflow-wrap:anywhere}
       });
       player.load(url);
       log('PLAYER_LOAD', {urlHost:new URL(url).host, serviceWorker:config.serviceWorker.url});
-      status('Плеер загружает поток. Если видео не стартовало, нажми Play на самом видео.');
+      status('Поток загружается. Если видео не стартовало автоматически, нажми Play на самом видео.');
     } catch (e) {
       log('PLAYER_INIT_ERROR', describeError(e));
       status('Ошибка инициализации плеера: ' + (e.message || e));
