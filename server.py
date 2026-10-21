@@ -47,6 +47,46 @@ def get_kick_playback_url(channel_slug: str) -> dict:
     if parsed.scheme != "https" or not parsed.netloc:
         raise RuntimeError("Kick returned an invalid playback URL")
 
+    # The channel API can briefly report livestream metadata after the CDN
+    # master playlist has already disappeared. Probe it before reporting playback
+    # as ready. Never log the signed URL or its query parameters.
+    probe = Request(
+        playback_url,
+        headers={
+            "Accept": "application/vnd.apple.mpegurl, application/x-mpegURL, */*",
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/130.0.0.0 Safari/537.36"
+            ),
+        },
+        method="GET",
+    )
+    try:
+        with urlopen(probe, timeout=8) as response:
+            sample = response.read(4096)
+            if response.status != 200:
+                raise RuntimeError(
+                    f"Kick API reports live, but CDN playlist returned HTTP {response.status}"
+                )
+            if b"#EXTM3U" not in sample:
+                raise RuntimeError(
+                    "Kick API reports live, but CDN response is not an HLS master playlist"
+                )
+    except HTTPError as exc:
+        if exc.code == 404:
+            raise RuntimeError(
+                "Kick API reports live, but the CDN master playlist returned HTTP 404. "
+                "The stream may have just ended or Kick's live metadata may be stale; retry."
+            ) from None
+        raise RuntimeError(
+            f"Kick API reports live, but CDN playlist check returned HTTP {exc.code}"
+        ) from None
+    except (URLError, TimeoutError):
+        raise RuntimeError(
+            "Kick API reports live, but the CDN playlist could not be reached from the server"
+        ) from None
+
     return {"live": True, "channel": channel_slug, "playback_url": playback_url}
 
 
