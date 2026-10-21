@@ -64,21 +64,16 @@ small{color:#aab4c0}.warn{color:#ffcc80}
      if(!data.livestream)throw new Error('Канал офлайн');
      const master=data.playback_url||data.livestream.playback_url||data.stream&&data.stream.playback_url;
      if(!master||!master.startsWith('https://'))throw new Error('Playback URL не найден');
-     stage='master_playlist';started=performance.now();step(stage,{event:'begin',host:host(master)});
-     const mr=await fetch(master,{mode:'cors',credentials:'omit',cache:'no-store',signal,headers:{Accept:'application/vnd.apple.mpegurl, application/x-mpegURL, */*'}});
-     step(stage,{event:'response',status:mr.status,ok:mr.ok,host:host(mr.url||master)});
-     const mt=await mr.text();if(!mr.ok||!mt.includes('#EXTM3U'))throw new Error('Master playlist HTTP '+mr.status);
-     const lines=mt.split(/\r?\n/).map(x=>x.trim()).filter(Boolean), variants=[];
-     for(let i=0;i<lines.length;i++)if(lines[i].startsWith('#EXT-X-STREAM-INF:')){
-       const uri=lines.slice(i+1).find(x=>x&&!x.startsWith('#'));if(!uri)continue;
-       const a=lines[i].slice(lines[i].indexOf(':')+1),res=a.match(/RESOLUTION=(\d+)x(\d+)/),bw=a.match(/BANDWIDTH=(\d+)/);
-       const url=new URL(uri,mr.url||master);if(!url.search&&new URL(master).search)url.search=new URL(master).search;
-       variants.push({url:url.href,height:res?Number(res[2]):0,bw:bw?Number(bw[1]):0});
-     }
-     if(!variants.length&&lines.some(x=>x.startsWith('#EXTINF:')))return {url:mr.url||master,text:mt};
-     if(!variants.length)throw new Error('Варианты качества не найдены');
-     variants.sort((a,b)=>a.height-b.height||a.bw-b.bw);
-     const selected=variants.find(v=>v.height===480)||variants.find(v=>v.height===360)||variants[Math.floor((variants.length-1)/2)];
+     stage='server_resolver';started=performance.now();step(stage,{event:'begin'});
+     const rr=await fetch('/api/resolve-playlist',{method:'POST',credentials:'same-origin',cache:'no-store',signal,headers:{'Content-Type':'application/json',Accept:'application/json'},body:JSON.stringify({playbackUrl:master,userAgent:navigator.userAgent})});
+     step(stage,{event:'response',status:rr.status,ok:rr.ok});
+     let resolved;
+     try{resolved=await rr.json()}catch(_){throw new Error('Resolver вернул не JSON (HTTP '+rr.status+')')}
+     if(!rr.ok||!resolved||!resolved.ok)throw new Error('Server resolver HTTP '+rr.status+': '+(resolved&&resolved.error||'unknown_error'));
+     const variants=Array.isArray(resolved.variants)?resolved.variants:[];
+     const selected=resolved.preferred||variants.find(v=>v.height===480)||variants.find(v=>v.height===720)||variants.find(v=>v.height===360)||variants[0];
+     log('RESOLVER_RESPONSE',{status:rr.status,variantCount:variants.length,variants:variants.map(v=>v.label||((v.height||'?')+'p')),selected:selected?selected.label||((selected.height||'?')+'p'):null});
+     if(!selected||typeof selected.url!=='string'||!selected.url.startsWith('https://'))throw new Error('Resolver не вернул безопасный URL варианта');
      stage='media_playlist';started=performance.now();step(stage,{event:'begin',host:host(selected.url),selectedHeight:selected.height||null});
      const response=await fetch(selected.url,{mode:'cors',credentials:'omit',cache:'no-store',signal,headers:{Accept:'application/vnd.apple.mpegurl, application/x-mpegURL, */*'}});
      step(stage,{event:'response',status:response.status,ok:response.ok,host:host(response.url||selected.url)});
