@@ -25,12 +25,12 @@ small{color:#aab4c0}.warn{color:#ffcc80}
 <p id="status">Готов. Запуск может потребовать нажатия Play из-за правил автозапуска Safari.</p>
 <small>Видеоданные идут напрямую из CDN в браузер. Сервер не ретранслирует медиабайты. Подписанные URL не выводятся в лог.</small>
 </div>
-<div class="card"><strong>Диагностика</strong><button id="copy" class="secondary">Скопировать лог</button><button id="clear" class="secondary">Очистить лог</button><pre id="log"></pre></div>
+<div class="card"><strong>Сравнение задержки · метки события</strong><p>Когда одно и то же заметное событие появится в соответствующем видео, нажми кнопку. Сравнение приблизительное: учитывает скорость реакции человека.</p><button id="markKick" class="secondary">Метка: событие появилось в Kick</button><button id="markOurs" class="secondary">Метка: событие появилось у нас</button><p id="markResult">Пока нет парных меток.</p></div><div class="card"><strong>Диагностика</strong><button id="copy" class="secondary">Скопировать лог</button><button id="clear" class="secondary">Очистить лог</button><pre id="log"></pre></div>
 <script src="https://cdn.jsdelivr.net/npm/mpegts.js@1.8.0/dist/mpegts.min.js"></script>
 <script>
 (() => {
  const $=id=>document.getElementById(id), video=$('video'), logEl=$('log');
- let player=null, loaderInstance=null, runId=0, startedAt=0, firstData=false, firstFrame=false, snapshotTimer=null, lastFrameCallbackAt=null, lastFrameMediaTime=null, lastFrameGapLogAt=0;
+ let player=null, loaderInstance=null, runId=0, startedAt=0, firstData=false, firstFrame=false, snapshotTimer=null, lastFrameCallbackAt=null, lastFrameMediaTime=null, lastFrameGapLogAt=0, kickMark=null, oursMark=null;
  function log(name,data){logEl.textContent+=new Date().toLocaleTimeString()+' '+name+(data===undefined?'':' '+JSON.stringify(data))+'\n';logEl.scrollTop=logEl.scrollHeight}
  function status(s){$('status').textContent=s;log('STATUS',s)}
  function err(e){return {name:e&&e.name||'Error',message:String(e&&e.message||e).replace(/https?:\/\/[^\s"'<>]+/gi,'[url-redacted]').slice(0,180)}}
@@ -218,6 +218,21 @@ small{color:#aab4c0}.warn{color:#ffcc80}
      snapshotTimer=setInterval(()=>{if(runId===thisRun&&player)reportBuffer()},5000);
    }catch(e){log('START_ERROR',err(e));status('Не удалось запустить. Смотри лог.')}
  }
+ function markEvent(side){
+   const mark={side,wallClock:new Date().toISOString(),performanceMs:Math.round(performance.now()),videoCurrentTime:Number(video.currentTime.toFixed(3)),readyState:video.readyState,paused:video.paused};
+   log('COMPARISON_EVENT_MARK',mark);
+   if(side==='kick')kickMark=mark;else oursMark=mark;
+   if(kickMark&&oursMark){
+     const delta=oursMark.performanceMs-kickMark.performanceMs;
+     const result=delta<0?'Наш плеер отмечен раньше Kick примерно на '+Math.abs(delta)+' мс':delta>0?'Наш плеер отмечен позже Kick примерно на '+delta+' мс':'Обе метки в одну миллисекунду';
+     $('markResult').textContent=result+' (ручная оценка, включая реакцию человека).';
+     log('COMPARISON_EVENT_RESULT',{kickWallClock:kickMark.wallClock,oursWallClock:oursMark.wallClock,oursMinusKickMs:delta,interpretation:result+'; ручная оценка, не точное измерение live latency'});
+     kickMark=null;oursMark=null;
+   }else{
+     $('markResult').textContent='Ожидается метка второго плеера. Для следующего события нажимайте обе кнопки заново.';
+   }
+ }
+ $('markKick').addEventListener('click',()=>markEvent('kick'));$('markOurs').addEventListener('click',()=>markEvent('ours'));
  $('start').addEventListener('click',start);$('stop').addEventListener('click',stop);
  $('clear').addEventListener('click',()=>logEl.textContent='');
  $('copy').addEventListener('click',async()=>{try{await navigator.clipboard.writeText(logEl.textContent);status('Лог скопирован')}catch(e){status('Не удалось скопировать; выдели лог вручную')}});
