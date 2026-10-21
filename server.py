@@ -34,7 +34,7 @@ def get_kick_playback_url(channel_slug: str) -> dict:
 
     playback_url = payload.get("playback_url")
     livestream = payload.get("livestream")
-    is_live = isinstance(livestream, dict) or bool(livestream)
+    is_live = bool(livestream)
 
     # Kick may keep a playback URL in the channel response while the channel is offline.
     # Never send an offline URL to the player.
