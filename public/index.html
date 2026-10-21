@@ -160,6 +160,31 @@ small{color:#aab4c0}.status{overflow-wrap:anywhere}
         }
       }
       log('PLAYBACK_URL_READY', {channel, live:true, host:new URL(url).host, source:playbackSource});
+      status('Разбираю метаданные плейлиста и выбираю качество…');
+      const resolveResponse = await fetch('/api/resolve-playlist', {
+        method:'POST', headers:{'Content-Type':'application/json'}, cache:'no-store',
+        body:JSON.stringify({playbackUrl:url, userAgent:navigator.userAgent})
+      });
+      const resolved = await resolveResponse.json();
+      log('RESOLVER_RESPONSE', {
+        status:resolveResponse.status, ok:resolveResponse.ok && resolved.ok === true,
+        error:resolved.error || null, upstreamStatus:resolved.status || null,
+        variantCount:Array.isArray(resolved.variants) ? resolved.variants.length : 0,
+        variants:Array.isArray(resolved.variants) ? resolved.variants.map(v => ({
+          label:v.label, width:v.width, height:v.height, bandwidth:v.bandwidth
+        })) : [],
+        selected:resolved.preferred ? resolved.preferred.label : null
+      });
+      if (!resolveResponse.ok || resolved.ok !== true || !resolved.preferred || typeof resolved.preferred.url !== 'string') {
+        throw new Error(resolved.error || ('Resolver HTTP ' + resolveResponse.status));
+      }
+      url = resolved.preferred.url;
+      log('RESOLVER_VARIANT_SELECTED', {
+        label:resolved.preferred.label, height:resolved.preferred.height,
+        host:new URL(url).host, path:new URL(url).pathname.split('/').slice(0,3).join('/'),
+        tokenPresent:!!new URL(url).search,
+        note:'Only playlist metadata was resolved on server; media segments stay on device'
+      });
     } catch (e) {
       log('PLAYBACK_URL_ERROR', {message:e.message || 'Не удалось получить URL', source:playbackSource});
       status('Не удалось получить трансляцию: ' + (e.message || 'ошибка сервера'));
@@ -221,7 +246,7 @@ small{color:#aab4c0}.status{overflow-wrap:anywhere}
     catch(e) { log('CLIPBOARD_ERROR', describeError(e)); status('Не удалось скопировать автоматически — выдели лог вручную.'); }
   });
   // Bump this identifier for every diagnostic-page deployment so mobile logs reveal stale builds.
-  log('SITE_VERSION', {version:'ivs-diag-20261022-r2', build:'browser-playlist-probe'});
+  log('SITE_VERSION', {version:'ivs-diag-20261022-r3', build:'metadata-resolver-ivs-player'});
   checkEnvironment();
   if ('serviceWorker' in navigator) {
     navigator.serviceWorker.addEventListener('controllerchange', () => log('SW_CONTROLLER_CHANGE', {controlled:!!navigator.serviceWorker.controller}));
