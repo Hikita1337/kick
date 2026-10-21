@@ -1,6 +1,6 @@
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from urllib.error import HTTPError, URLError
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, urlsplit, urljoin, urlunsplit
 from urllib.request import Request, urlopen
 import json
 import os
@@ -109,6 +109,94 @@ class Handler(SimpleHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+
+    def do_POST(self):
+        if urlsplit(self.path).path != "/api/resolve-playlist":
+            self.send_json(404, {"error": "not_found"})
+            return
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            if length <= 0 or length > 128 * 1024:
+                self.send_json(413, {"error": "invalid_body_size"})
+                return
+            payload = json.loads(self.rfile.read(length))
+            master = payload.get("playbackUrl", "")
+            ua = payload.get("userAgent", "")
+            parsed = urlsplit(master if isinstance(master, str) else "")
+            allowed_master_host = "fa723fc1b171.us-west-2.playback.live-video.net"
+            if (parsed.scheme != "https" or parsed.hostname != allowed_master_host
+                    or not parsed.path.endswith(".m3u8")):
+                self.send_json(400, {"error": "unsupported_playback_url"})
+                return
+            if (not isinstance(ua, str) or not ua or len(ua) > 1024
+                    or "\\r" in ua or "\\n" in ua):
+                self.send_json(400, {"error": "invalid_user_agent"})
+                return
+            request = Request(master, headers={
+                "User-Agent": ua,
+                "Accept": "application/x-mpegURL, application/vnd.apple.mpegurl, */*",
+                "Cache-Control": "no-cache",
+            }, method="GET")
+            with urlopen(request, timeout=12) as response:
+                if response.status != 200:
+                    self.send_json(502, {"error": "upstream_http", "status": response.status})
+                    return
+                text = response.read(1024 * 1024).decode("utf-8", "replace")
+            lines = [line.strip() for line in text.splitlines() if line.strip()]
+            variants = []
+            for i, line in enumerate(lines):
+                if not line.startswith("#EXT-X-STREAM-INF:"):
+                    continue
+                uri = next((x for x in lines[i + 1:] if not x.startswith("#")), None)
+                if not uri:
+                    continue
+                attrs = line.split(":", 1)[1]
+                resolution = re.search(r"(?:^|,)RESOLUTION=(\\d+)x(\\d+)", attrs)
+                bandwidth = re.search(r"(?:^|,)BANDWIDTH=(\\d+)", attrs)
+                fps = re.search(r"(?:^|,)FRAME-RATE=([\\d.]+)", attrs)
+                child = urljoin(master, uri)
+                cp = urlsplit(child)
+                host = (cp.hostname or "").lower()
+                allowed_child = (
+                    host.endswith(".cloudfront.hls.live-video.net")
+                    or host.endswith(".playback.live-video.net")
+                    or host.endswith(".playlist.live-video.net")
+                )
+                if cp.scheme != "https" or not allowed_child:
+                    continue
+                if not cp.query and parsed.query:
+                    child = urlunsplit(cp._replace(query=parsed.query))
+                width = int(resolution.group(1)) if resolution else 0
+                height = int(resolution.group(2)) if resolution else 0
+                variants.append({
+                    "url": child, "width": width, "height": height,
+                    "bandwidth": int(bandwidth.group(1)) if bandwidth else 0,
+                    "fps": float(fps.group(1)) if fps else None,
+                    "label": f"{height}p" if height else "Unknown quality",
+                })
+            if not variants:
+                self.send_json(502, {"error": "no_variants_in_master_playlist"})
+                return
+            variants.sort(key=lambda item: (item["height"], item["bandwidth"]), reverse=True)
+            preferred = next(
+                (item for height in (480, 720, 360) for item in variants if item["height"] == height),
+                variants[0],
+            )
+            print("resolver: upstream=200 variants=%s selected=%s" % (
+                ",".join(item["label"] for item in variants), preferred["label"]
+            ), flush=True)
+            self.send_json(200, {"ok": True, "isMediaPlaylist": False,
+                                 "variants": variants, "preferred": preferred})
+        except HTTPError as exc:
+            self.send_json(502, {"error": "upstream_http", "status": exc.code})
+        except (URLError, TimeoutError):
+            self.send_json(502, {"error": "upstream_unreachable"})
+        except (ValueError, json.JSONDecodeError):
+            self.send_json(400, {"error": "invalid_json"})
+        except Exception as exc:
+            print("resolver error: %s" % type(exc).__name__, flush=True)
+            self.send_json(502, {"error": "resolver_failed", "detail": type(exc).__name__})
 
     def do_GET(self):
         path = urlsplit(self.path).path
