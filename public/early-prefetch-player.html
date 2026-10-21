@@ -30,14 +30,15 @@ small{color:#aab4c0}.warn{color:#ffcc80}
 <script>
 (() => {
  const $=id=>document.getElementById(id), video=$('video'), logEl=$('log');
- let player=null, loaderInstance=null, runId=0, startedAt=0, firstData=false, firstFrame=false, snapshotTimer=null;
+ let player=null, loaderInstance=null, runId=0, startedAt=0, firstData=false, firstFrame=false, snapshotTimer=null, lastFrameCallbackAt=null, lastFrameMediaTime=null, lastFrameGapLogAt=0;
  function log(name,data){logEl.textContent+=new Date().toLocaleTimeString()+' '+name+(data===undefined?'':' '+JSON.stringify(data))+'\n';logEl.scrollTop=logEl.scrollHeight}
  function status(s){$('status').textContent=s;log('STATUS',s)}
  function err(e){return {name:e&&e.name||'Error',message:String(e&&e.message||e).replace(/https?:\/\/[^\s"'<>]+/gi,'[url-redacted]').slice(0,180)}}
  const host=u=>{try{return new URL(u).host}catch(_){return ''}};
  function reportBuffer(){
    let ahead=0;try{if(video.buffered.length)ahead=Math.max(0,video.buffered.end(video.buffered.length-1)-video.currentTime)}catch(_){}
-   log('VIDEO_SNAPSHOT',{currentTime:Number(video.currentTime.toFixed(3)),readyState:video.readyState,paused:video.paused,bufferAheadSeconds:Number(ahead.toFixed(3)),videoWidth:video.videoWidth,videoHeight:video.videoHeight});
+   let quality=null;try{if(typeof video.getVideoPlaybackQuality==='function'){const q=video.getVideoPlaybackQuality();quality={totalVideoFrames:q.totalVideoFrames,droppedVideoFrames:q.droppedVideoFrames}}else{quality={totalVideoFrames:video.webkitDecodedFrameCount??null,droppedVideoFrames:video.webkitDroppedFrameCount??null}}}catch(_){}
+   log('VIDEO_SNAPSHOT',{currentTime:Number(video.currentTime.toFixed(3)),readyState:video.readyState,paused:video.paused,bufferAheadSeconds:Number(ahead.toFixed(3)),videoWidth:video.videoWidth,videoHeight:video.videoHeight,playbackQuality:quality});
  }
  for(const event of ['loadedmetadata','playing','waiting','stalled','error','emptied','abort','ended']){
    video.addEventListener(event,()=>{log('VIDEO_'+event.toUpperCase(),{currentTime:Number(video.currentTime.toFixed(3)),readyState:video.readyState,networkState:video.networkState,error:video.error?{code:video.error.code,message:video.error.message}:null});if(event==='playing'&&!firstFrame){firstFrame=true;log('FIRST_PLAYING_EVENT',{elapsedMs:Math.round(performance.now()-startedAt)});status('Видео воспроизводится. Проверьте задержку и стабильность.')}});
@@ -210,8 +211,8 @@ small{color:#aab4c0}.warn{color:#ffcc80}
      player.on(mpegts.Events.STATISTICS_INFO,info=>log('MPEGTS_STATS',{speed:info.speed,decodedFrames:info.decodedFrames,droppedFrames:info.droppedFrames,buffer:info.buffer}));
      player.attachMediaElement(video);player.load();loaderInstance=player;
      if('requestVideoFrameCallback' in HTMLVideoElement.prototype){
-       const frame=()=>{if(runId!==thisRun)return;if(!firstFrame&&video.videoWidth>0){firstFrame=true;log('FIRST_VIDEO_FRAME_CALLBACK',{elapsedMs:Math.round(performance.now()-startedAt),mediaTime:video.currentTime});}video.requestVideoFrameCallback(frame)};
-       video.requestVideoFrameCallback(frame);
+       const frame=(now,metadata)=>{if(runId!==thisRun)return;const mediaTime=metadata&&Number.isFinite(metadata.mediaTime)?metadata.mediaTime:video.currentTime;if(lastFrameCallbackAt!==null){const gapMs=now-lastFrameCallbackAt;const mediaDelta=lastFrameMediaTime===null?null:mediaTime-lastFrameMediaTime;if(gapMs>=100&&now-lastFrameGapLogAt>=750){lastFrameGapLogAt=now;log('VIDEO_FRAME_GAP',{gapMs:Math.round(gapMs),mediaDeltaSeconds:mediaDelta===null?null:Number(mediaDelta.toFixed(3)),presentedFrames:metadata&&Number.isFinite(metadata.presentedFrames)?metadata.presentedFrames:null,processingDuration:metadata&&Number.isFinite(metadata.processingDuration)?metadata.processingDuration:null})}}lastFrameCallbackAt=now;lastFrameMediaTime=mediaTime;if(!firstFrame&&video.videoWidth>0){firstFrame=true;log('FIRST_VIDEO_FRAME_CALLBACK',{elapsedMs:Math.round(performance.now()-startedAt),mediaTime:video.currentTime});}video.requestVideoFrameCallback(frame)};
+       lastFrameCallbackAt=null;lastFrameMediaTime=null;lastFrameGapLogAt=0;video.requestVideoFrameCallback(frame);
      }
      status('Загрузчик запущен. Нажми Play, если Safari не начал воспроизведение.');
      snapshotTimer=setInterval(()=>{if(runId===thisRun&&player)reportBuffer()},5000);
