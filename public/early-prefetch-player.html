@@ -205,7 +205,7 @@ small{color:#aab4c0}.warn{color:#ffcc80}
      log('INITIAL_PLAYLIST',{regularSegments:parsed.regular.length,prefetchEntries:parsed.prefetch.length,targetDuration:parsed.targetDuration,mediaSequence:parsed.mediaSequence});
      if(thisRun!==runId)return;
      // A custom URL is only a bootstrap identifier; EarlyPrefetchLoader resolves Kick's live playlist itself.
-     player=mpegts.createPlayer({type:'mpegts',isLive:true,hasAudio:true,hasVideo:true,url:'https://example.invalid/kick-live.ts',cors:true},{customLoader:EarlyPrefetchLoader,enableWorker:false,enableStashBuffer:false,stashInitialSize:64*1024,liveSync:false,liveBufferLatencyChasing:false,lazyLoad:false,autoCleanupSourceBuffer:true,autoCleanupMaxBackwardDuration:20,autoCleanupMinBackwardDuration:8});
+     player=mpegts.createPlayer({type:'mpegts',isLive:true,hasAudio:true,hasVideo:true,url:'https://example.invalid/kick-live.ts',cors:true},{customLoader:EarlyPrefetchLoader,enableWorker:true,enableStashBuffer:false,stashInitialSize:64*1024,liveSync:false,liveBufferLatencyChasing:false,lazyLoad:false,autoCleanupSourceBuffer:true,autoCleanupMaxBackwardDuration:20,autoCleanupMinBackwardDuration:8});
      player.on(mpegts.Events.ERROR,(type,detail,info)=>{log('MPEGTS_ERROR',{type,detail,info:info?String(info).slice(0,180):null});status('Ошибка декодирования/потока. Смотри лог.')});
      player.on(mpegts.Events.MEDIA_INFO,info=>log('MEDIA_INFO',{mimeType:info.mimeType,width:info.width,height:info.height,audioCodec:info.audioCodec,videoCodec:info.videoCodec}));
      player.on(mpegts.Events.STATISTICS_INFO,info=>log('MPEGTS_STATS',{speed:info.speed,decodedFrames:info.decodedFrames,droppedFrames:info.droppedFrames,buffer:info.buffer}));
