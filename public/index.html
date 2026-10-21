@@ -57,12 +57,20 @@ small{color:#aab4c0}.status{overflow-wrap:anywhere}
         credentials:'omit',
         headers:{'Accept':'application/vnd.apple.mpegurl, application/x-mpegURL, */*'}
       });
-      const sample = (await response.text()).slice(0,4096);
+      const sample = (await response.text()).slice(0,16384);
+      const lines = sample.split(/\\r?\\n/).map(line => line.trim()).filter(Boolean);
+      const segmentLine = lines.find(line => !line.startsWith('#'));
       const result = {
         status:response.status,
         ok:response.ok,
         contentType:response.headers.get('content-type') || '',
         extm3u:sample.includes('#EXTM3U'),
+        playlistType:lines.some(line => line.startsWith('#EXT-X-STREAM-INF:')) ? 'master' :
+          (lines.some(line => line.startsWith('#EXTINF:')) ? 'media' : 'unknown'),
+        mediaSequence:(lines.find(line => line.startsWith('#EXT-X-MEDIA-SEQUENCE:')) || '').split(':')[1] || null,
+        targetDuration:(lines.find(line => line.startsWith('#EXT-X-TARGETDURATION:')) || '').split(':')[1] || null,
+        segmentEntries:lines.filter(line => line.startsWith('#EXTINF:')).length,
+        firstSegmentHost:segmentLine ? (() => { try { return new URL(segmentLine, url).host; } catch (_) { return ''; } })() : null,
         sampleLength:sample.length,
         finalHost:(() => { try { return new URL(response.url).host; } catch (_) { return ''; } })()
       };
@@ -225,6 +233,19 @@ small{color:#aab4c0}.status{overflow-wrap:anywhere}
       status('Ошибка инициализации плеера: ' + (e.message || e));
     }
   }
+  let lastObservedVideoTime = 0;
+  video.addEventListener('timeupdate', () => {
+    const current = video.currentTime;
+    if (lastObservedVideoTime > 2 && current < 1) {
+      log('VIDEO_TIME_RESET', {
+        previousTime:Math.round(lastObservedVideoTime * 10) / 10,
+        currentTime:Math.round(current * 10) / 10,
+        readyState:video.readyState,
+        networkState:video.networkState
+      });
+    }
+    lastObservedVideoTime = current;
+  });
   video.addEventListener('playing', () => {
     log('VIDEO_PLAYING', {currentTime:video.currentTime, readyState:video.readyState});
     if (!firstPlayingLogged && startAt) {
@@ -233,7 +254,7 @@ small{color:#aab4c0}.status{overflow-wrap:anywhere}
       status('Видео воспроизводится.');
     }
   });
-  for (const ev of ['loadstart','loadedmetadata','canplay','waiting','stalled','suspend','error','pause','ended']) {
+  for (const ev of ['loadstart','loadedmetadata','canplay','waiting','stalled','suspend','emptied','abort','seeking','seeked','error','pause','ended']) {
     video.addEventListener(ev, () => {
       log('VIDEO_' + ev.toUpperCase(), {currentTime:video.currentTime, readyState:video.readyState, networkState:video.networkState, error:video.error ? {code:video.error.code,message:video.error.message} : null});
     });
@@ -246,7 +267,7 @@ small{color:#aab4c0}.status{overflow-wrap:anywhere}
     catch(e) { log('CLIPBOARD_ERROR', describeError(e)); status('Не удалось скопировать автоматически — выдели лог вручную.'); }
   });
   // Bump this identifier for every diagnostic-page deployment so mobile logs reveal stale builds.
-  log('SITE_VERSION', {version:'ivs-diag-20261022-r3', build:'metadata-resolver-ivs-player'});
+  log('SITE_VERSION', {version:'2026.10.22-r4', build:'playlist-and-reset-diagnostics'});
   checkEnvironment();
   if ('serviceWorker' in navigator) {
     navigator.serviceWorker.addEventListener('controllerchange', () => log('SW_CONTROLLER_CHANGE', {controlled:!!navigator.serviceWorker.controller}));
