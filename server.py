@@ -9,7 +9,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent / "public"
 PORT = int(os.environ.get("PORT", "10000"))
-CHANNEL_RE = re.compile(r"^[A-Za-z0-9_]{1,50}$")
+CHANNEL_RE = re.compile(r"^[A-Za-z0-9_-]{1,50}$")
 
 
 def get_kick_playback_url(channel_slug: str) -> dict:
@@ -34,13 +34,20 @@ def get_kick_playback_url(channel_slug: str) -> dict:
 
     playback_url = payload.get("playback_url")
     livestream = payload.get("livestream")
+    is_live = isinstance(livestream, dict) or bool(livestream)
+
+    # Kick may keep a playback URL in the channel response while the channel is offline.
+    # Never send an offline URL to the player.
+    if not is_live:
+        return {"live": False, "channel": channel_slug, "playback_url": None}
+
     if not isinstance(playback_url, str) or not playback_url:
-        raise RuntimeError("Kick did not provide a playback URL; check that the channel is live")
+        raise RuntimeError("Kick reports the channel as live but did not provide a playback URL")
     parsed = urlsplit(playback_url)
     if parsed.scheme != "https" or not parsed.netloc:
         raise RuntimeError("Kick returned an invalid playback URL")
 
-    return {"live": bool(livestream), "channel": channel_slug, "playback_url": playback_url}
+    return {"live": True, "channel": channel_slug, "playback_url": playback_url}
 
 
 class Handler(SimpleHTTPRequestHandler):
@@ -76,7 +83,7 @@ class Handler(SimpleHTTPRequestHandler):
 
         if path == "/api/playback-url":
             params = parse_qs(urlsplit(self.path).query)
-            channel = (params.get("channel") or ["Serpens2025"])[0].strip()
+            channel = (params.get("channel") or ["good-girl21"])[0].strip()
             if not CHANNEL_RE.fullmatch(channel):
                 self.send_json(400, {"error": "Invalid Kick channel name"})
                 return
