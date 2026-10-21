@@ -21,7 +21,7 @@ small{color:#aab4c0}.status{overflow-wrap:anywhere}
 <p>Сервер сам получает актуальный playback URL публичной трансляции Kick и передаёт его официальному IVS Player. Работает на iPhone, Android и ПК.</p>
 <div class="card">
 <label for="channel">Имя канала Kick</label>
-<input id="channel" type="text" value="Serpens2025" inputmode="text" autocapitalize="none" autocomplete="off" spellcheck="false" placeholder="например, Serpens2025">
+<input id="channel" type="text" value="good-girl21" inputmode="text" autocapitalize="none" autocomplete="off" spellcheck="false" placeholder="например, good-girl21">
 <button id="start">Получить трансляцию и запустить</button>
 <button id="stop" class="secondary">Остановить</button>
 <button id="check" class="secondary">Проверить Service Worker</button>
@@ -81,7 +81,7 @@ small{color:#aab4c0}.status{overflow-wrap:anywhere}
   }
   async function startPlayer() {
     const channel = $('channel').value.trim();
-    if (!/^[A-Za-z0-9_]{1,50}$/.test(channel)) {
+    if (!/^[A-Za-z0-9_-]{1,50}$/.test(channel)) {
       status('Введи корректное имя канала Kick без ссылки.');
       return;
     }
