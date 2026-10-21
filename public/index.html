@@ -42,7 +42,7 @@ small{color:#aab4c0}.status{overflow-wrap:anywhere}
   }
   function status(s) { statusEl.textContent = s; log('STATUS', s); }
   function redactText(value) {
-    return String(value == null ? '' : value).replace(/https?:\\/\\/[^\\s"'<>]+/gi, raw => {
+    return String(value == null ? '' : value).replace(/https?:\/\/[^\s"'<>]+/gi, raw => {
       try { const u = new URL(raw); return u.origin + u.pathname + (u.search ? '?[redacted]' : ''); }
       catch (_) { return '[url-redacted]'; }
     });
@@ -76,7 +76,7 @@ small{color:#aab4c0}.status{overflow-wrap:anywhere}
         host:u.host,
         path:'/' + parts.slice(0, 3).join('/').slice(0, 100),
         queryPresent:!!u.search,
-        extension:(parts[parts.length - 1] || '').match(/\\.([a-z0-9]{1,8})$/i)?.[1]?.toLowerCase() || ''
+        extension:(parts[parts.length - 1] || '').match(/\.([a-z0-9]{1,8})$/i)?.[1]?.toLowerCase() || ''
       };
     } catch (_) { return {host:'', path:'', queryPresent:false, extension:''}; }
   }
@@ -169,7 +169,7 @@ small{color:#aab4c0}.status{overflow-wrap:anywhere}
         const entries = performance.getEntriesByType('resource');
         const mediaEntries = entries.filter(e => {
           const u = safeUrl(e.name);
-          return /playlist|cloudfront|live-video|\\.m3u8$|\\.ts$|\\.m4s$|\\.aac$|\\.mp4$/i.test(u.host + u.path + '.' + u.extension);
+          return /playlist|cloudfront|live-video|\.m3u8$|\.ts$|\.m4s$|\.aac$|\.mp4$/i.test(u.host + u.path + '.' + u.extension);
         });
         log('RESOURCE_SUMMARY', {
           totalResourceEntries:entries.length, mediaResourceEntries:mediaEntries.length,
@@ -439,7 +439,7 @@ small{color:#aab4c0}.status{overflow-wrap:anywhere}
     catch(e) { log('CLIPBOARD_ERROR', describeError(e)); status('Не удалось скопировать автоматически — выдели лог вручную.'); }
   });
   // Bump this identifier for every diagnostic-page deployment so mobile logs reveal stale builds.
-  log('SITE_VERSION', {version:'2026.10.22-r6', build:'deep-media-network-buffer-diagnostics-redacted-errors'});
+  log('SITE_VERSION', {version:'2026.10.22-r7', build:'deep-media-network-buffer-diagnostics-redacted-errors-fix'});
   checkEnvironment();
   startResourceDiagnostics();
   if ('serviceWorker' in navigator) {
