@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#101318">
+<title>Kick Early Prefetch Player · Lab</title>
+<style>
+:root{color-scheme:dark;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#101318;color:#f3f5f7}
+*{box-sizing:border-box}body{margin:0;padding:14px 12px calc(24px + env(safe-area-inset-bottom));max-width:900px;margin-inline:auto}
+h1{font-size:23px;margin:5px 0 8px}p{color:#bac2cc;line-height:1.45}.card{background:#1a2028;border:1px solid #303946;border-radius:14px;padding:13px;margin:12px 0}
+input,button{font:inherit;border-radius:10px;width:100%;padding:12px;border:1px solid #3b4654;margin:5px 0}
+input{background:#0f1319;color:#fff}button{background:#e6edf5;color:#101318;font-weight:700}button.secondary{background:#28313d;color:#f3f5f7}
+video{width:100%;background:#000;aspect-ratio:16/9;border-radius:10px}pre{white-space:pre-wrap;overflow-wrap:anywhere;font:12px/1.45 ui-monospace,monospace;max-height:35vh;overflow:auto;background:#0d1117;padding:10px;border-radius:9px}
+small{color:#aab4c0}.warn{color:#ffcc80}
+</style>
+</head>
+<body>
+<h1>Kick · Early Prefetch Player Lab</h1>
+<p>Экспериментальный клиентский загрузчик. Читает playlist и EXT-X-PREFETCH с CDN, передаёт MPEG-TS байты в mpegts.js для демультиплексирования и transmux в браузере. Это эксперимент: не production-плеер.</p>
+<div class="card">
+<label for="channel">Канал Kick</label><input id="channel" value="maloycser" autocapitalize="none" autocomplete="off" spellcheck="false">
+<button id="start">Запустить собственный загрузчик</button><button id="stop" class="secondary">Остановить</button>
+<video id="video" controls playsinline webkit-playsinline></video>
+<p id="status">Готов. Запуск может потребовать нажатия Play из-за правил автозапуска Safari.</p>
+<small>Видеоданные идут напрямую из CDN в браузер. Сервер не ретранслирует медиабайты. Подписанные URL не выводятся в лог.</small>
+</div>
+<div class="card"><strong>Диагностика</strong><button id="copy" class="secondary">Скопировать лог</button><button id="clear" class="secondary">Очистить лог</button><pre id="log"></pre></div>
+<script src="https://cdn.jsdelivr.net/npm/mpegts.js@1.8.0/dist/mpegts.min.js"></script>
+<script>
+(() => {
+ const $=id=>document.getElementById(id), video=$('video'), logEl=$('log');
+ let player=null, loaderInstance=null, runId=0, startedAt=0, firstData=false, firstFrame=false;
+ function log(name,data){logEl.textContent+=new Date().toLocaleTimeString()+' '+name+(data===undefined?'':' '+JSON.stringify(data))+'\n';logEl.scrollTop=logEl.scrollHeight}
+ function status(s){$('status').textContent=s;log('STATUS',s)}
+ function err(e){return {name:e&&e.name||'Error',message:String(e&&e.message||e).replace(/https?:\/\/[^\s"'<>]+/gi,'[url-redacted]').slice(0,180)}}
+ const host=u=>{try{return new URL(u).host}catch(_){return ''}};
+ function reportBuffer(){
+   let ahead=0;try{if(video.buffered.length)ahead=Math.max(0,video.buffered.end(video.buffered.length-1)-video.currentTime)}catch(_){}
+   log('VIDEO_SNAPSHOT',{currentTime:Number(video.currentTime.toFixed(3)),readyState:video.readyState,paused:video.paused,bufferAheadSeconds:Number(ahead.toFixed(3)),videoWidth:video.videoWidth,videoHeight:video.videoHeight});
+ }
+ for(const event of ['loadedmetadata','playing','waiting','stalled','error','emptied','abort','ended']){
+   video.addEventListener(event,()=>{log('VIDEO_'+event.toUpperCase(),{currentTime:Number(video.currentTime.toFixed(3)),readyState:video.readyState,networkState:video.networkState,error:video.error?{code:video.error.code,message:video.error.message}:null});if(event==='playing'&&!firstFrame){firstFrame=true;log('FIRST_PLAYING_EVENT',{elapsedMs:Math.round(performance.now()-startedAt)});status('Видео воспроизводится. Проверьте задержку и стабильность.')}});
+ }
+ if('requestVideoFrameCallback' in HTMLVideoElement.prototype){
+   const frame=()=>{if(!firstFrame&&video.videoWidth>0){firstFrame=true;log('FIRST_VIDEO_FRAME_CALLBACK',{elapsedMs:Math.round(performance.now()-startedAt),mediaTime:video.currentTime});}if(runId)video.requestVideoFrameCallback(frame)};
+   video.requestVideoFrameCallback(frame);
+ }
+ function parsePlaylist(text,base){
+   const lines=text.split(/\r?\n/).map(x=>x.trim()).filter(Boolean), regular=[],prefetch=[];let duration=null;
+   for(const line of lines){
+     if(line.startsWith('#EXTINF:'))duration=Number((line.slice(8).split(',')[0]||'0'));
+     else if(line.startsWith('#EXT-X-PREFETCH:')){const u=line.slice(line.indexOf(':')+1).trim().replace(/^"|"$/g,'');if(u)prefetch.push(new URL(u,base).href)}
+     else if(line.startsWith('#EXT-X-PART:')){const m=line.match(/URI="([^"]+)"/);if(m)prefetch.push(new URL(m[1],base).href)}
+     else if(!line.startsWith('#')&&duration!==null){regular.push({url:new URL(line,base).href,duration});duration=null}
+   }
+   return {lines,regular,prefetch,targetDuration:Number((lines.find(x=>x.startsWith('#EXT-X-TARGETDURATION:'))||'').split(':')[1]||6),mediaSequence:(lines.find(x=>x.startsWith('#EXT-X-MEDIA-SEQUENCE:'))||'').split(':')[1]||null};
+ }
+ async function getMediaPlaylist(channel,signal){
+   const api=await fetch('https://kick.com/api/v2/channels/'+encodeURIComponent(channel),{credentials:'omit',cache:'no-store',signal,headers:{Accept:'application/json'}});
+   if(!api.ok)throw new Error('Kick API HTTP '+api.status);
+   const data=await api.json();if(!data.livestream)throw new Error('Канал офлайн');
+   const master=data.playback_url||data.livestream.playback_url||data.stream&&data.stream.playback_url;
+   if(!master||!master.startsWith('https://'))throw new Error('Playback URL не найден');
+   const mr=await fetch(master,{mode:'cors',credentials:'omit',cache:'no-store',signal,headers:{Accept:'application/vnd.apple.mpegurl, application/x-mpegURL, */*'}});
+   const mt=await mr.text();if(!mr.ok||!mt.includes('#EXTM3U'))throw new Error('Master playlist HTTP '+mr.status);
+   const lines=mt.split(/\r?\n/).map(x=>x.trim()).filter(Boolean), variants=[];
+   for(let i=0;i<lines.length;i++)if(lines[i].startsWith('#EXT-X-STREAM-INF:')){
+     const uri=lines.slice(i+1).find(x=>x&&!x.startsWith('#'));if(!uri)continue;
+     const a=lines[i].slice(lines[i].indexOf(':')+1),res=a.match(/RESOLUTION=(\d+)x(\d+)/),bw=a.match(/BANDWIDTH=(\d+)/);
+     const url=new URL(uri,mr.url||master);if(!url.search&&new URL(master).search)url.search=new URL(master).search;
+     variants.push({url:url.href,height:res?Number(res[2]):0,bw:bw?Number(bw[1]):0});
+   }
+   if(!variants.length&&lines.some(x=>x.startsWith('#EXTINF:')))return {url:mr.url||master,text:mt};
+   if(!variants.length)throw new Error('Варианты качества не найдены');
+   variants.sort((a,b)=>a.height-b.height||a.bw-b.bw);
+   const selected=variants.find(v=>v.height===480)||variants.find(v=>v.height===360)||variants[Math.floor((variants.length-1)/2)];
+   const response=await fetch(selected.url,{mode:'cors',credentials:'omit',cache:'no-store',signal,headers:{Accept:'application/vnd.apple.mpegurl, application/x-mpegURL, */*'}});
+   const text=await response.text();if(!response.ok||!text.includes('#EXTM3U'))throw new Error('Media playlist HTTP '+response.status);
+   log('PLAYLIST_FETCH',{status:response.status,host:host(response.url||selected.url),selectedHeight:selected.height||null,bytes:text.length});
+   return {url:response.url||selected.url,text};
+ }
+ class EarlyPrefetchLoader{
+   constructor(seekHandler,config){
+     this._type='kick-early-prefetch';this._status=0;this._needStash=false;
+     this._onContentLengthKnown=null;this._onURLRedirect=null;this._onDataArrival=null;this._onError=null;this._onComplete=null;
+     this._controller=null;this._playlistController=null;this._cancelled=false;this._received=0;this._queue=[];this._seen=new Set();this._active=new Map();this._pumpBusy=false;this._pollBusy=false;this._run=runId;this._channel=$('channel').value.trim();this._lastSequence=null;
+   }
+   get type(){return this._type} get status(){return this._status} get needStashBuffer(){return false}
+   get onContentLengthKnown(){return this._onContentLengthKnown} set onContentLengthKnown(v){this._onContentLengthKnown=v}
+   get onURLRedirect(){return this._onURLRedirect} set onURLRedirect(v){this._onURLRedirect=v}
+   get onDataArrival(){return this._onDataArrival} set onDataArrival(v){this._onDataArrival=v}
+   get onError(){return this._onError} set onError(v){this._onError=v}
+   get onComplete(){return this._onComplete} set onComplete(v){this._onComplete=v}
+   isWorking(){return this._status===1||this._status===2}
+   open(dataSource,range){
+     this._range=range||{from:0,to:-1};this._status=1;this._controller=new AbortController();this._playlistController=new AbortController();
+     this._runLoop().catch(e=>{if(!this._cancelled){this._status=3;log('LOADER_ERROR',err(e));if(this._onError)this._onError('Exception',{code:-1,msg:String(e.message||e)})}});
+   }
+   async _runLoop(){
+     let initial=true;
+     while(!this._cancelled&&this._run===runId){
+       this._pollBusy=true;
+       try{
+         const p=await getMediaPlaylist(this._channel,this._playlistController.signal);
+         const parsed=parsePlaylist(p.text,p.url);
+         const tags={targetDuration:parsed.targetDuration,mediaSequence:parsed.mediaSequence,regularSegments:parsed.regular.length,prefetchEntries:parsed.prefetch.length};
+         log('PLAYLIST_STATE',tags);
+         if(parsed.mediaSequence!==this._lastSequence){this._lastSequence=parsed.mediaSequence}
+         // Begin near the live edge; queue the newest complete segment first, then early prefetch URLs.
+         const initialUrls=initial?parsed.regular.slice(-1).map(x=>x.url):[];
+         const urls=initialUrls.concat(parsed.prefetch);
+         for(const url of urls){
+           if(this._seen.has(url))continue;
+           this._seen.add(url);this._queue.push({url,prefetch:parsed.prefetch.includes(url)});
+         }
+         // Once a prefetch URL appears as a complete EXTINF segment, do not refetch/duplicate it.
+         for(const seg of parsed.regular.slice(-3)){
+           if(!this._seen.has(seg.url)&&!this._queue.some(x=>x.url===seg.url)){
+             this._seen.add(seg.url);this._queue.push({url:seg.url,prefetch:false});
+           }
+         }
+         initial=false;
+         this._status=2;
+         this._pumpQueue();
+       }catch(e){if(!this._cancelled){log('PLAYLIST_POLL_ERROR',err(e));}}
+       finally{this._pollBusy=false}
+       await new Promise(resolve=>{this._pollTimer=setTimeout(resolve,Math.max(400,Math.min(1000,(this._targetDuration||6)*250)))});
+     }
+   }
+   async _pumpQueue(){
+     if(this._pumpBusy||this._cancelled)return;this._pumpBusy=true;
+     try{
+       while(this._queue.length&&!this._cancelled){
+         const item=this._queue.shift();if(this._active.has(item.url))continue;
+         this._active.set(item.url,true);
+         const start=performance.now();let received=0,firstByte=null;
+         try{
+           const response=await fetch(item.url,{mode:'cors',credentials:'omit',cache:'no-store',signal:this._controller.signal});
+           if(!response.ok||!response.body)throw new Error('Segment HTTP '+response.status+' or no readable body');
+           log('SEGMENT_OPEN',{kind:item.prefetch?'prefetch':'regular',status:response.status,host:host(response.url||item.url),headersMs:Math.round(performance.now()-start)});
+           const reader=response.body.getReader();
+           while(!this._cancelled){
+             const result=await reader.read();if(result.done)break;
+             const view=result.value;if(!view||!view.byteLength)continue;
+             if(firstByte===null){firstByte=Math.round(performance.now()-start);log('SEGMENT_FIRST_BYTES',{kind:item.prefetch?'prefetch':'regular',firstByteMs:firstByte,bytes:view.byteLength})}
+             received+=view.byteLength;this._received+=view.byteLength;
+             if(!firstData){firstData=true;log('FIRST_TS_BYTES',{elapsedMs:Math.round(performance.now()-startedAt),kind:item.prefetch?'prefetch':'regular'})}
+             if(this._onDataArrival){
+               const exact=view.buffer.slice(view.byteOffset,view.byteOffset+view.byteLength);
+               this._onDataArrival(exact,this._received-view.byteLength,this._received);
+             }
+           }
+           log('SEGMENT_END',{kind:item.prefetch?'prefetch':'regular',bytes:received,elapsedMs:Math.round(performance.now()-start)});
+         }catch(e){if(!this._cancelled)log('SEGMENT_ERROR',{kind:item.prefetch?'prefetch':'regular',host:host(item.url),...err(e)})}
+         finally{this._active.delete(item.url)}
+       }
+     }finally{this._pumpBusy=false;if(this._queue.length&&!this._cancelled)this._pumpQueue()}
+   }
+   abort(){this._cancelled=true;this._status=4;try{this._controller&&this._controller.abort()}catch(_){}try{this._playlistController&&this._playlistController.abort()}catch(_){}clearTimeout(this._pollTimer);this._queue=[]}
+   destroy(){this.abort();this._onDataArrival=this._onError=this._onComplete=this._onContentLengthKnown=this._onURLRedirect=null;this._status=0}
+ }
+ function stop(){
+   runId++;try{if(player){player.pause();player.unload();player.detachMediaElement();player.destroy()}}catch(e){log('PLAYER_DESTROY_ERROR',err(e))}
+   player=null;loaderInstance=null;
+   try{video.pause();video.removeAttribute('src');video.load()}catch(_){}
+   firstData=false;firstFrame=false;status('Остановлено.');
+ }
+ async function start(){
+   stop();const thisRun=runId;startedAt=performance.now();firstData=false;firstFrame=false;
+   const channel=$('channel').value.trim();if(!/^[A-Za-z0-9_-]{1,50}$/.test(channel)){status('Неверное имя канала');return}
+   if(!window.mpegts||!mpegts.isSupported()){status('mpegts.js/MSE не поддерживается в этом браузере');log('CAPABILITIES',{mpegts:!!window.mpegts,isSupported:!!window.mpegts&&mpegts.isSupported(),mediaSource:typeof MediaSource,managedMediaSource:typeof ManagedMediaSource,userAgent:navigator.userAgent});return}
+   log('CAPABILITIES',{mpegtsVersion:mpegts.version||null,isSupported:mpegts.isSupported(),mediaSource:typeof MediaSource,managedMediaSource:typeof ManagedMediaSource,secureContext:isSecureContext,userAgent:navigator.userAgent});
+   status('Запускаю собственный загрузчик…');
+   try{
+     const abort=new AbortController();const p=await getMediaPlaylist(channel,abort.signal);const parsed=parsePlaylist(p.text,p.url);
+     if(!parsed.regular.length&&!parsed.prefetch.length)throw new Error('В плейлисте пока нет сегментов');
+     log('INITIAL_PLAYLIST',{regularSegments:parsed.regular.length,prefetchEntries:parsed.prefetch.length,targetDuration:parsed.targetDuration,mediaSequence:parsed.mediaSequence});
+     if(thisRun!==runId)return;
+     // A custom URL is only a bootstrap identifier; EarlyPrefetchLoader resolves Kick's live playlist itself.
+     player=mpegts.createPlayer({type:'mpegts',isLive:true,hasAudio:true,hasVideo:true,url:'https://example.invalid/kick-live.ts',cors:true},{customLoader:EarlyPrefetchLoader,enableWorker:false,enableStashBuffer:false,stashInitialSize:64*1024,liveSync:false,liveBufferLatencyChasing:false,lazyLoad:false,autoCleanupSourceBuffer:true,autoCleanupMaxBackwardDuration:20,autoCleanupMinBackwardDuration:8});
+     player.on(mpegts.Events.ERROR,(type,detail,info)=>{log('MPEGTS_ERROR',{type,detail,info:info?String(info).slice(0,180):null});status('Ошибка декодирования/потока. Смотри лог.')});
+     player.on(mpegts.Events.MEDIA_INFO,info=>log('MEDIA_INFO',{mimeType:info.mimeType,width:info.width,height:info.height,audioCodec:info.audioCodec,videoCodec:info.videoCodec}));
+     player.on(mpegts.Events.STATISTICS_INFO,info=>log('MPEGTS_STATS',{speed:info.speed,decodedFrames:info.decodedFrames,droppedFrames:info.droppedFrames,buffer:info.buffer}));
+     player.attachMediaElement(video);player.load();loaderInstance=player;
+     status('Загрузчик запущен. Нажми Play, если Safari не начал воспроизведение.');
+     setInterval(()=>{if(runId===thisRun&&player)reportBuffer()},5000);
+   }catch(e){log('START_ERROR',err(e));status('Не удалось запустить. Смотри лог.')}
+ }
+ $('start').addEventListener('click',start);$('stop').addEventListener('click',stop);
+ $('clear').addEventListener('click',()=>logEl.textContent='');
+ $('copy').addEventListener('click',async()=>{try{await navigator.clipboard.writeText(logEl.textContent);status('Лог скопирован')}catch(e){status('Не удалось скопировать; выдели лог вручную')}});
+ log('LAB_READY',{origin:location.origin,secureContext:isSecureContext,userAgent:navigator.userAgent});
+})();
+</script>
+</body>
+</html>
