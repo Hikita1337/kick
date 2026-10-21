@@ -43,7 +43,136 @@ small{color:#aab4c0}.status{overflow-wrap:anywhere}
   function status(s) { statusEl.textContent = s; log('STATUS', s); }
   function describeError(e) {
     if (!e) return {};
-    return {name:e.name || '', message:e.message || String(e), code:e.code, source:e.source};
+    const out = {name:e.name || '', message:e.message || String(e), code:e.code, source:e.source};
+    try {
+      for (const key of Object.keys(e)) {
+        if (!(key in out)) {
+          const value = e[key];
+          if (value === null || ['string','number','boolean'].includes(typeof value)) out[key] = value;
+        }
+      }
+    } catch (_) {}
+    return out;
+  }
+  const diag = {
+    runId: Math.random().toString(36).slice(2, 8),
+    lastTime: 0, lastSampleAt: 0, lastResetAt: 0,
+    lastResourceCount: 0, resourceObserver: null, sampleTimer: null,
+    resourceSeen: new Set(), active: false
+  };
+  function safeUrl(raw) {
+    try {
+      const u = new URL(raw, location.href);
+      const parts = u.pathname.split('/').filter(Boolean);
+      return {
+        host:u.host,
+        path:'/' + parts.slice(0, 3).join('/').slice(0, 100),
+        queryPresent:!!u.search,
+        extension:(parts[parts.length - 1] || '').match(/\\.([a-z0-9]{1,8})$/i)?.[1]?.toLowerCase() || ''
+      };
+    } catch (_) { return {host:'', path:'', queryPresent:false, extension:''}; }
+  }
+  function mediaSnapshot() {
+    const ranges = list => {
+      const out = [];
+      try { for (let i=0; i<list.length; i++) out.push([+list.start(i).toFixed(3), +list.end(i).toFixed(3)]); } catch (_) {}
+      return out;
+    };
+    let quality = null;
+    try {
+      if (typeof video.getVideoPlaybackQuality === 'function') {
+        const q = video.getVideoPlaybackQuality();
+        quality = {totalVideoFrames:q.totalVideoFrames, droppedVideoFrames:q.droppedVideoFrames, corruptedVideoFrames:q.corruptedVideoFrames};
+      } else {
+        quality = {
+          webkitDecodedFrameCount:video.webkitDecodedFrameCount,
+          webkitDroppedFrameCount:video.webkitDroppedFrameCount
+        };
+      }
+    } catch (_) {}
+    const buffered = ranges(video.buffered);
+    const seekable = ranges(video.seekable);
+    let bufferAhead = 0;
+    for (const range of buffered) if (video.currentTime >= range[0] - 0.25 && video.currentTime <= range[1] + 0.25) bufferAhead = Math.max(0, range[1] - video.currentTime);
+    const conn = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
+    return {
+      currentTime:+(video.currentTime || 0).toFixed(3),
+      duration:Number.isFinite(video.duration) ? +video.duration.toFixed(3) : String(video.duration),
+      paused:video.paused, ended:video.ended, seeking:video.seeking, playbackRate:video.playbackRate,
+      readyState:video.readyState, readyStateName:['HAVE_NOTHING','HAVE_METADATA','HAVE_CURRENT_DATA','HAVE_FUTURE_DATA','HAVE_ENOUGH_DATA'][video.readyState] || 'unknown',
+      networkState:video.networkState, networkStateName:['NETWORK_EMPTY','NETWORK_IDLE','NETWORK_LOADING','NETWORK_NO_SOURCE'][video.networkState] || 'unknown',
+      videoWidth:video.videoWidth, videoHeight:video.videoHeight,
+      volume:video.volume, muted:video.muted, autoplay:video.autoplay,
+      buffered, seekable, bufferAheadSeconds:+bufferAhead.toFixed(3),
+      playbackQuality:quality,
+      mediaError:video.error ? {code:video.error.code, message:video.error.message, codeName:({1:'MEDIA_ERR_ABORTED',2:'MEDIA_ERR_NETWORK',3:'MEDIA_ERR_DECODE',4:'MEDIA_ERR_SRC_NOT_SUPPORTED'})[video.error.code] || 'unknown'} : null,
+      visibility:document.visibilityState, online:navigator.onLine,
+      connection:conn ? {effectiveType:conn.effectiveType, type:conn.type, downlink:conn.downlink, rtt:conn.rtt, saveData:conn.saveData} : null,
+      currentSrc:safeUrl(video.currentSrc || video.src || '')
+    };
+  }
+  function logMediaSnapshot(reason) {
+    log('MEDIA_SNAPSHOT', {reason, ...mediaSnapshot()});
+  }
+  function logResource(entry, source) {
+    const u = safeUrl(entry.name);
+    if (!u.host || u.host === location.host) return;
+    const looksRelevant = /playlist|cloudfront|live-video|\.m3u8$|\.ts$|\.m4s$|\.aac$|\.mp4$|\.cmfv$|\.cmfa$/i.test(u.host + u.path + '.' + u.extension);
+    if (!looksRelevant) return;
+    const key = [entry.name.split('?')[0], Math.round(entry.startTime), Math.round(entry.duration), source].join('|');
+    if (diag.resourceSeen.has(key)) return;
+    diag.resourceSeen.add(key);
+    log('MEDIA_RESOURCE', {
+      source, ...u,
+      initiatorType:entry.initiatorType || '',
+      startTimeMs:+entry.startTime.toFixed(1),
+      durationMs:+entry.duration.toFixed(1),
+      transferSize:entry.transferSize || 0,
+      encodedBodySize:entry.encodedBodySize || 0,
+      decodedBodySize:entry.decodedBodySize || 0,
+      responseStatus:typeof entry.responseStatus === 'number' ? entry.responseStatus : null,
+      redirectStart:entry.redirectStart || 0,
+      redirectEnd:entry.redirectEnd || 0,
+      note:entry.responseStatus === 0 || !entry.responseStatus ? 'Cross-origin timing may hide HTTP status; zero is not necessarily an HTTP error.' : ''
+    });
+  }
+  function startResourceDiagnostics() {
+    if (!('PerformanceObserver' in window)) {
+      log('RESOURCE_TIMING_UNAVAILABLE');
+      return;
+    }
+    try {
+      diag.resourceObserver = new PerformanceObserver(list => {
+        for (const entry of list.getEntries()) logResource(entry, 'observer');
+      });
+      diag.resourceObserver.observe({type:'resource', buffered:true});
+      log('RESOURCE_TIMING_STARTED', {supportedEntryTypes:PerformanceObserver.supportedEntryTypes || []});
+    } catch (e) {
+      log('RESOURCE_TIMING_ERROR', describeError(e));
+    }
+  }
+  function startSampler() {
+    if (diag.sampleTimer) clearInterval(diag.sampleTimer);
+    diag.lastSampleAt = performance.now();
+    diag.sampleTimer = setInterval(() => {
+      if (!diag.active || !player) return;
+      logMediaSnapshot('periodic-5s');
+      try {
+        const entries = performance.getEntriesByType('resource');
+        const mediaEntries = entries.filter(e => {
+          const u = safeUrl(e.name);
+          return /playlist|cloudfront|live-video|\\.m3u8$|\\.ts$|\\.m4s$|\\.aac$|\\.mp4$/i.test(u.host + u.path + '.' + u.extension);
+        });
+        log('RESOURCE_SUMMARY', {
+          totalResourceEntries:entries.length, mediaResourceEntries:mediaEntries.length,
+          newestMediaResources:mediaEntries.slice(-8).map(e => ({
+            ...safeUrl(e.name), startTimeMs:+e.startTime.toFixed(1), durationMs:+e.duration.toFixed(1),
+            transferSize:e.transferSize || 0, encodedBodySize:e.encodedBodySize || 0,
+            responseStatus:typeof e.responseStatus === 'number' ? e.responseStatus : null
+          }))
+        });
+      } catch (e) { log('RESOURCE_SUMMARY_ERROR', describeError(e)); }
+    }, 5000);
   }
   async function probePlaylistFromBrowser(url) {
     // Diagnostic only: never log the signed URL or its query/token.
@@ -115,9 +244,11 @@ small{color:#aab4c0}.status{overflow-wrap:anywhere}
     }
   }
   function stopPlayer() {
+    diag.active = false;
+    if (diag.sampleTimer) { clearInterval(diag.sampleTimer); diag.sampleTimer = null; }
     if (player) { try { player.pause(); player.delete(); } catch(e) { log('PLAYER_STOP_ERROR', describeError(e)); } player = null; }
     try { video.pause(); video.removeAttribute('src'); video.load(); } catch (_) {}
-    log('PLAYER_STOPPED');
+    log('PLAYER_STOPPED', {runId:diag.runId});
   }
   async function startPlayer() {
     const channel = $('channel').value.trim();
@@ -126,8 +257,13 @@ small{color:#aab4c0}.status{overflow-wrap:anywhere}
       return;
     }
     stopPlayer();
+    diag.runId = Math.random().toString(36).slice(2, 8);
+    diag.resourceSeen = new Set();
+    diag.active = true;
     startAt = performance.now();
     firstPlayingLogged = false;
+    log('DIAGNOSTIC_RUN_START', {runId:diag.runId, channel, timeOrigin:performance.timeOrigin, href:safeUrl(location.href), visibility:document.visibilityState, online:navigator.onLine});
+    startSampler();
     status('Запрашиваю актуальный адрес трансляции у сервера…');
 
     let url, playbackSource = 'kick-client-api';
@@ -220,10 +356,20 @@ small{color:#aab4c0}.status{overflow-wrap:anywhere}
       player.addEventListener(IVSPlayer.PlayerState.PLAYING, () => log('PLAYER_STATE_PLAYING'));
       player.addEventListener(IVSPlayer.PlayerState.IDLE, () => log('PLAYER_STATE_IDLE'));
       player.addEventListener(IVSPlayer.PlayerEventType.ERROR, e => {
-        log('PLAYER_ERROR', e && {type:e.type, code:e.code, source:e.source, message:e.message});
+        let detail = describeError(e);
+        try {
+          detail = {...detail, enumerableKeys:Object.keys(e || {}), json:(() => { try { return JSON.stringify(e); } catch (_) { return '[not serializable]'; } })()};
+        } catch (_) {}
+        log('PLAYER_ERROR', {runId:diag.runId, ...detail, media:mediaSnapshot()});
+        logMediaSnapshot('immediately-after-player-error');
         status('Ошибка IVS Player. Подробности в логе.');
       });
-      log('PLAYER_LOAD', {urlHost:new URL(url).host, serviceWorker:config.serviceWorker.url});
+      const sdkInfo = {};
+      for (const name of ['getVersion','getState','getQuality','getQualities','getStatistics','getLiveLatency','getBufferDuration','getPlaybackRate']) {
+        try { if (typeof player[name] === 'function') { const value = player[name](); sdkInfo[name] = value === undefined ? '[undefined]' : value; } } catch (e) { sdkInfo[name] = {error:e.message || String(e)}; }
+      }
+      log('IVS_SDK_DIAGNOSTICS', {versionExpected:'1.57.0', supported:IVSPlayer.isPlayerSupported, playerMethods:Object.keys(Object.getPrototypeOf(player) || {}).sort(), availableGetters:sdkInfo});
+      log('PLAYER_LOAD', {runId:diag.runId, urlHost:new URL(url).host, serviceWorker:config.serviceWorker.url, videoCrossOrigin:video.crossOrigin});
       // Probe from the same browser/device immediately before the player loads.
       await probePlaylistFromBrowser(url);
       player.load(url);
@@ -237,12 +383,13 @@ small{color:#aab4c0}.status{overflow-wrap:anywhere}
   video.addEventListener('timeupdate', () => {
     const current = video.currentTime;
     if (lastObservedVideoTime > 2 && current < 1) {
+      diag.lastResetAt = performance.now();
       log('VIDEO_TIME_RESET', {
-        previousTime:Math.round(lastObservedVideoTime * 10) / 10,
-        currentTime:Math.round(current * 10) / 10,
-        readyState:video.readyState,
-        networkState:video.networkState
+        runId:diag.runId, previousTime:Math.round(lastObservedVideoTime * 10) / 10,
+        currentTime:Math.round(current * 10) / 10, elapsedSinceLastResetMs:diag.lastResetAt - (diag._previousResetAt || 0),
+        readyState:video.readyState, networkState:video.networkState, media:mediaSnapshot()
       });
+      diag._previousResetAt = diag.lastResetAt;
     }
     lastObservedVideoTime = current;
   });
@@ -254,10 +401,27 @@ small{color:#aab4c0}.status{overflow-wrap:anywhere}
       status('Видео воспроизводится.');
     }
   });
-  for (const ev of ['loadstart','loadedmetadata','canplay','waiting','stalled','suspend','emptied','abort','seeking','seeked','error','pause','ended']) {
+  for (const ev of ['loadstart','loadedmetadata','loadeddata','canplay','canplaythrough','playing','waiting','stalled','suspend','emptied','abort','seeking','seeked','error','pause','ended','durationchange','ratechange','volumechange','encrypted']) {
     video.addEventListener(ev, () => {
-      log('VIDEO_' + ev.toUpperCase(), {currentTime:video.currentTime, readyState:video.readyState, networkState:video.networkState, error:video.error ? {code:video.error.code,message:video.error.message} : null});
+      log('VIDEO_' + ev.toUpperCase(), {runId:diag.runId, ...mediaSnapshot()});
+      if (['abort','emptied','error','stalled','waiting','ended'].includes(ev)) logMediaSnapshot('event-' + ev);
+      if (ev === 'error' && video.error) log('VIDEO_ERROR_DETAILS', {
+        code:video.error.code,
+        codeName:({1:'MEDIA_ERR_ABORTED',2:'MEDIA_ERR_NETWORK',3:'MEDIA_ERR_DECODE',4:'MEDIA_ERR_SRC_NOT_SUPPORTED'})[video.error.code] || 'unknown',
+        message:video.error.message || '', media:mediaSnapshot()
+      });
     });
+  }
+  window.addEventListener('error', e => log('WINDOW_ERROR', {message:e.message, filename:safeUrl(e.filename || ''), lineno:e.lineno, colno:e.colno, error:describeError(e.error)}));
+  window.addEventListener('unhandledrejection', e => log('UNHANDLED_REJECTION', describeError(e.reason)));
+  window.addEventListener('online', () => { log('NETWORK_ONLINE'); logMediaSnapshot('online'); });
+  window.addEventListener('offline', () => { log('NETWORK_OFFLINE'); logMediaSnapshot('offline'); });
+  document.addEventListener('visibilitychange', () => { log('VISIBILITY_CHANGE', {visibility:document.visibilityState}); logMediaSnapshot('visibility-change'); });
+  if (navigator.connection && typeof navigator.connection.addEventListener === 'function') {
+    navigator.connection.addEventListener('change', () => log('NETWORK_CONNECTION_CHANGE', {
+      effectiveType:navigator.connection.effectiveType, type:navigator.connection.type,
+      downlink:navigator.connection.downlink, rtt:navigator.connection.rtt, saveData:navigator.connection.saveData
+    }));
   }
   $('start').addEventListener('click', startPlayer);
   $('stop').addEventListener('click', stopPlayer);
@@ -267,8 +431,9 @@ small{color:#aab4c0}.status{overflow-wrap:anywhere}
     catch(e) { log('CLIPBOARD_ERROR', describeError(e)); status('Не удалось скопировать автоматически — выдели лог вручную.'); }
   });
   // Bump this identifier for every diagnostic-page deployment so mobile logs reveal stale builds.
-  log('SITE_VERSION', {version:'2026.10.22-r4', build:'playlist-and-reset-diagnostics'});
+  log('SITE_VERSION', {version:'2026.10.22-r5', build:'deep-media-network-buffer-diagnostics'});
   checkEnvironment();
+  startResourceDiagnostics();
   if ('serviceWorker' in navigator) {
     navigator.serviceWorker.addEventListener('controllerchange', () => log('SW_CONTROLLER_CHANGE', {controlled:!!navigator.serviceWorker.controller}));
     navigator.serviceWorker.getRegistrations().then(regs => log('SW_EXISTING_REGISTRATIONS', regs.map(r => r.scope))).catch(e => log('SW_LIST_ERROR', describeError(e)));
