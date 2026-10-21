@@ -19,7 +19,7 @@ small{color:#aab4c0}.warn{color:#ffcc80}
 <h1>Kick · Early Prefetch Player Lab</h1>
 <p>Экспериментальный клиентский загрузчик. Читает playlist и EXT-X-PREFETCH с CDN, передаёт MPEG-TS байты в mpegts.js для демультиплексирования и transmux в браузере. Это эксперимент: не production-плеер.</p>
 <div class="card">
-<label for="channel">Канал Kick</label><input id="channel" value="maloycser" autocapitalize="none" autocomplete="off" spellcheck="false">
+<label for="channel">Канал Kick</label><input id="channel" value="good-girl21" autocapitalize="none" autocomplete="off" spellcheck="false">
 <button id="start">Запустить собственный загрузчик</button><button id="stop" class="secondary">Остановить</button>
 <video id="video" controls playsinline webkit-playsinline></video>
 <p id="status">Готов. Запуск может потребовать нажатия Play из-за правил автозапуска Safari.</p>
@@ -53,28 +53,43 @@ small{color:#aab4c0}.warn{color:#ffcc80}
    return {lines,regular,prefetch,targetDuration:Number((lines.find(x=>x.startsWith('#EXT-X-TARGETDURATION:'))||'').split(':')[1]||6),mediaSequence:(lines.find(x=>x.startsWith('#EXT-X-MEDIA-SEQUENCE:'))||'').split(':')[1]||null};
  }
  async function getMediaPlaylist(channel,signal){
-   const api=await fetch('https://kick.com/api/v2/channels/'+encodeURIComponent(channel),{credentials:'omit',cache:'no-store',signal,headers:{Accept:'application/json'}});
-   if(!api.ok)throw new Error('Kick API HTTP '+api.status);
-   const data=await api.json();if(!data.livestream)throw new Error('Канал офлайн');
-   const master=data.playback_url||data.livestream.playback_url||data.stream&&data.stream.playback_url;
-   if(!master||!master.startsWith('https://'))throw new Error('Playback URL не найден');
-   const mr=await fetch(master,{mode:'cors',credentials:'omit',cache:'no-store',signal,headers:{Accept:'application/vnd.apple.mpegurl, application/x-mpegURL, */*'}});
-   const mt=await mr.text();if(!mr.ok||!mt.includes('#EXTM3U'))throw new Error('Master playlist HTTP '+mr.status);
-   const lines=mt.split(/\r?\n/).map(x=>x.trim()).filter(Boolean), variants=[];
-   for(let i=0;i<lines.length;i++)if(lines[i].startsWith('#EXT-X-STREAM-INF:')){
-     const uri=lines.slice(i+1).find(x=>x&&!x.startsWith('#'));if(!uri)continue;
-     const a=lines[i].slice(lines[i].indexOf(':')+1),res=a.match(/RESOLUTION=(\d+)x(\d+)/),bw=a.match(/BANDWIDTH=(\d+)/);
-     const url=new URL(uri,mr.url||master);if(!url.search&&new URL(master).search)url.search=new URL(master).search;
-     variants.push({url:url.href,height:res?Number(res[2]):0,bw:bw?Number(bw[1]):0});
+   let stage='kick_api', started=performance.now();
+   const step=(name,extra={})=>log('NETWORK_STAGE',{stage:name,elapsedMs:Math.round(performance.now()-started),...extra});
+   try{
+     step(stage,{event:'begin',channel});
+     const api=await fetch('https://kick.com/api/v2/channels/'+encodeURIComponent(channel),{credentials:'omit',cache:'no-store',signal,headers:{Accept:'application/json'}});
+     step(stage,{event:'response',status:api.status,ok:api.ok});
+     if(!api.ok)throw new Error('Kick API HTTP '+api.status);
+     stage='kick_api_json'; const data=await api.json();step(stage,{event:'parsed',hasLivestream:!!data.livestream});
+     if(!data.livestream)throw new Error('Канал офлайн');
+     const master=data.playback_url||data.livestream.playback_url||data.stream&&data.stream.playback_url;
+     if(!master||!master.startsWith('https://'))throw new Error('Playback URL не найден');
+     stage='master_playlist';started=performance.now();step(stage,{event:'begin',host:host(master)});
+     const mr=await fetch(master,{mode:'cors',credentials:'omit',cache:'no-store',signal,headers:{Accept:'application/vnd.apple.mpegurl, application/x-mpegURL, */*'}});
+     step(stage,{event:'response',status:mr.status,ok:mr.ok,host:host(mr.url||master)});
+     const mt=await mr.text();if(!mr.ok||!mt.includes('#EXTM3U'))throw new Error('Master playlist HTTP '+mr.status);
+     const lines=mt.split(/\r?\n/).map(x=>x.trim()).filter(Boolean), variants=[];
+     for(let i=0;i<lines.length;i++)if(lines[i].startsWith('#EXT-X-STREAM-INF:')){
+       const uri=lines.slice(i+1).find(x=>x&&!x.startsWith('#'));if(!uri)continue;
+       const a=lines[i].slice(lines[i].indexOf(':')+1),res=a.match(/RESOLUTION=(\d+)x(\d+)/),bw=a.match(/BANDWIDTH=(\d+)/);
+       const url=new URL(uri,mr.url||master);if(!url.search&&new URL(master).search)url.search=new URL(master).search;
+       variants.push({url:url.href,height:res?Number(res[2]):0,bw:bw?Number(bw[1]):0});
+     }
+     if(!variants.length&&lines.some(x=>x.startsWith('#EXTINF:')))return {url:mr.url||master,text:mt};
+     if(!variants.length)throw new Error('Варианты качества не найдены');
+     variants.sort((a,b)=>a.height-b.height||a.bw-b.bw);
+     const selected=variants.find(v=>v.height===480)||variants.find(v=>v.height===360)||variants[Math.floor((variants.length-1)/2)];
+     stage='media_playlist';started=performance.now();step(stage,{event:'begin',host:host(selected.url),selectedHeight:selected.height||null});
+     const response=await fetch(selected.url,{mode:'cors',credentials:'omit',cache:'no-store',signal,headers:{Accept:'application/vnd.apple.mpegurl, application/x-mpegURL, */*'}});
+     step(stage,{event:'response',status:response.status,ok:response.ok,host:host(response.url||selected.url)});
+     const text=await response.text();if(!response.ok||!text.includes('#EXTM3U'))throw new Error('Media playlist HTTP '+response.status);
+     log('PLAYLIST_FETCH',{status:response.status,host:host(response.url||selected.url),selectedHeight:selected.height||null,bytes:text.length});
+     return {url:response.url||selected.url,text};
+   }catch(e){
+     log('PLAYLIST_STAGE_ERROR',{stage,...err(e)});
+     if(e&&e.name==='TypeError'&&String(e.message)==='Load failed')throw new Error('Fetch failed at stage: '+stage+' (iOS Safari usually hides the underlying network/CORS reason)');
+     throw e;
    }
-   if(!variants.length&&lines.some(x=>x.startsWith('#EXTINF:')))return {url:mr.url||master,text:mt};
-   if(!variants.length)throw new Error('Варианты качества не найдены');
-   variants.sort((a,b)=>a.height-b.height||a.bw-b.bw);
-   const selected=variants.find(v=>v.height===480)||variants.find(v=>v.height===360)||variants[Math.floor((variants.length-1)/2)];
-   const response=await fetch(selected.url,{mode:'cors',credentials:'omit',cache:'no-store',signal,headers:{Accept:'application/vnd.apple.mpegurl, application/x-mpegURL, */*'}});
-   const text=await response.text();if(!response.ok||!text.includes('#EXTM3U'))throw new Error('Media playlist HTTP '+response.status);
-   log('PLAYLIST_FETCH',{status:response.status,host:host(response.url||selected.url),selectedHeight:selected.height||null,bytes:text.length});
-   return {url:response.url||selected.url,text};
  }
  class EarlyPrefetchLoader{
    constructor(seekHandler,config){
