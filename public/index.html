@@ -95,11 +95,16 @@ small{color:#aab4c0}.status{overflow-wrap:anywhere}
       const response = await fetch('/api/playback-url?channel=' + encodeURIComponent(channel), {cache:'no-store'});
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || ('HTTP ' + response.status));
+      if (data.live !== true) {
+        log('CHANNEL_OFFLINE', {channel:data.channel || channel, live:false});
+        status('Канал ' + (data.channel || channel) + ' сейчас офлайн. Плеер не запускаю.');
+        return;
+      }
       url = data.playback_url;
       if (typeof url !== 'string' || !url.startsWith('https://')) {
-        throw new Error('Сервер не вернул корректный HTTPS playback URL.');
+        throw new Error('Kick сообщает, что канал в эфире, но корректный HTTPS playback URL не получен.');
       }
-      log('PLAYBACK_URL_READY', {channel:data.channel || channel, live:data.live, host:new URL(url).host});
+      log('PLAYBACK_URL_READY', {channel:data.channel || channel, live:true, host:new URL(url).host});
     } catch (e) {
       log('PLAYBACK_URL_ERROR', {message:e.message || 'Не удалось получить URL'});
       status('Не удалось получить трансляцию: ' + (e.message || 'ошибка сервера'));
