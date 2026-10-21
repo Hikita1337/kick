@@ -102,7 +102,7 @@ small{color:#aab4c0}.status{overflow-wrap:anywhere}
         if (!response.ok) throw new Error('Kick API HTTP ' + response.status);
         const data = await response.json();
         const live = data.livestream;
-        if (!live) {
+        if (!live || live.is_live === false) {
           log('CHANNEL_OFFLINE', {channel, source:'kick-client-api'});
           status('Канал ' + channel + ' сейчас офлайн. Плеер не запускаю.');
           return;
