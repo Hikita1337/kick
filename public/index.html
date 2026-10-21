@@ -45,6 +45,38 @@ small{color:#aab4c0}.status{overflow-wrap:anywhere}
     if (!e) return {};
     return {name:e.name || '', message:e.message || String(e), code:e.code, source:e.source};
   }
+  async function probePlaylistFromBrowser(url) {
+    // Diagnostic only: never log the signed URL or its query/token.
+    // The browser may block this fetch due to CORS; that result is not proof
+    // that the player request itself failed for the same reason.
+    try {
+      const response = await fetch(url, {
+        method:'GET',
+        cache:'no-store',
+        mode:'cors',
+        credentials:'omit',
+        headers:{'Accept':'application/vnd.apple.mpegurl, application/x-mpegURL, */*'}
+      });
+      const sample = (await response.text()).slice(0,4096);
+      const result = {
+        status:response.status,
+        ok:response.ok,
+        contentType:response.headers.get('content-type') || '',
+        extm3u:sample.includes('#EXTM3U'),
+        sampleLength:sample.length,
+        finalHost:(() => { try { return new URL(response.url).host; } catch (_) { return ''; } })()
+      };
+      log('BROWSER_PLAYLIST_PROBE', result);
+      return result;
+    } catch (e) {
+      log('BROWSER_PLAYLIST_PROBE_FAILED', {
+        name:e.name || 'Error',
+        message:e.message || String(e),
+        note:'Browser fetch may be blocked by CORS; this alone does not prove the IVS Player request failed.'
+      });
+      return null;
+    }
+  }
   function checkEnvironment() {
     const info = {
       origin: location.origin,
@@ -158,8 +190,10 @@ small{color:#aab4c0}.status{overflow-wrap:anywhere}
         log('PLAYER_ERROR', e && {type:e.type, code:e.code, source:e.source, message:e.message});
         status('Ошибка IVS Player. Подробности в логе.');
       });
-      player.load(url);
       log('PLAYER_LOAD', {urlHost:new URL(url).host, serviceWorker:config.serviceWorker.url});
+      // Probe from the same browser/device immediately before the player loads.
+      await probePlaylistFromBrowser(url);
+      player.load(url);
       status('Поток загружается. Если видео не стартовало автоматически, нажми Play на самом видео.');
     } catch (e) {
       log('PLAYER_INIT_ERROR', describeError(e));
