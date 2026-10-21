@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#101318">
+<title>IVS Player · диагностика</title>
+<style>
+:root{color-scheme:dark;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#101318;color:#f3f5f7}
+*{box-sizing:border-box}body{margin:0;padding:20px 14px calc(28px + env(safe-area-inset-bottom));max-width:760px;margin-inline:auto}
+h1{font-size:25px;margin:5px 0 8px}p{color:#bac2cc;line-height:1.45}.card{background:#1a2028;border:1px solid #303946;border-radius:15px;padding:15px;margin:14px 0}
+label{display:block;font-weight:600;margin:12px 0 7px}input,button{font:inherit;border-radius:10px;width:100%;padding:12px;border:1px solid #3b4654}
+input{background:#0f1319;color:#fff}button{background:#e6edf5;color:#101318;font-weight:700;margin-top:9px;cursor:pointer}button.secondary{background:#28313d;color:#f3f5f7}
+video{width:100%;background:#000;border-radius:12px;aspect-ratio:16/9;display:block;margin-top:12px}
+#log{white-space:pre-wrap;overflow-wrap:anywhere;font:12px/1.5 ui-monospace,SFMono-Regular,monospace;max-height:38vh;overflow:auto;background:#0d1117;padding:12px;border-radius:10px}
+small{color:#aab4c0}.status{overflow-wrap:anywhere}
+</style>
+</head>
+<body>
+<h1>Amazon IVS Player — тест</h1>
+<p>Проверка Service Worker и запуска видео в Safari на iPhone, Android и ПК. Используй только playback URL, который тебе разрешено открывать.</p>
+<div class="card">
+<label for="playback">HLS playback URL (.m3u8)</label>
+<input id="playback" type="url" inputmode="url" autocomplete="off" placeholder="https://…/index.m3u8">
+<button id="start">Запустить плеер</button>
+<button id="stop" class="secondary">Остановить</button>
+<button id="check" class="secondary">Проверить Service Worker</button>
+<video id="video" controls playsinline webkit-playsinline crossorigin="anonymous"></video>
+<p id="status" class="status">Ожидание URL.</p>
+<small>FIRST_PLAYING_MS измеряет время от нажатия кнопки до события playing, а не точную задержку эфира.</small>
+</div>
+<div class="card"><strong>Диагностический лог</strong><p><button id="copy" class="secondary">Скопировать лог</button></p><pre id="log"></pre></div>
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  const video = $('video'), logEl = $('log'), statusEl = $('status');
+  let player = null, startAt = 0, firstPlayingLogged = false;
+  function log(event, details) {
+    const line = new Date().toLocaleTimeString() + ' ' + event + (details === undefined ? '' : ' ' + JSON.stringify(details));
+    logEl.textContent += line + '\n';
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+  function status(s) { statusEl.textContent = s; log('STATUS', s); }
+  function describeError(e) {
+    if (!e) return {};
+    return {name:e.name || '', message:e.message || String(e), code:e.code, source:e.source};
+  }
+  function checkEnvironment() {
+    const info = {
+      origin: location.origin,
+      secureContext: window.isSecureContext,
+      userAgent: navigator.userAgent,
+      serviceWorker: 'serviceWorker' in navigator,
+      managedMediaSource: typeof window.ManagedMediaSource,
+      mediaSource: typeof window.MediaSource,
+      canPlayHls: video.canPlayType('application/vnd.apple.mpegurl')
+    };
+    log('ENVIRONMENT', info);
+    return info;
+  }
+  async function checkSW() {
+    if (!('serviceWorker' in navigator)) {
+      log('SW_UNAVAILABLE', {secureContext:window.isSecureContext});
+      status('Service Worker недоступен в этом браузере/контексте.');
+      return;
+    }
+    try {
+      const reg = await navigator.serviceWorker.register('/amazon-ivs-service-worker-loader.js');
+      await navigator.serviceWorker.ready;
+      log('SW_REGISTERED', {scope:reg.scope, active:!!reg.active, controller:!!navigator.serviceWorker.controller});
+      status('Service Worker зарегистрирован. Перезагрузи страницу, если нужен контроль controller.');
+    } catch (e) {
+      log('SW_ERROR', describeError(e));
+      status('Не удалось зарегистрировать Service Worker: ' + (e.message || e));
+    }
+  }
+  function stopPlayer() {
+    if (player) { try { player.pause(); player.delete(); } catch(e) { log('PLAYER_STOP_ERROR', describeError(e)); } player = null; }
+    try { video.pause(); video.removeAttribute('src'); video.load(); } catch (_) {}
+    log('PLAYER_STOPPED');
+  }
+  async function startPlayer() {
+    const url = $('playback').value.trim();
+    if (!url) { status('Сначала вставь HLS playback URL.'); return; }
+    try { new URL(url); } catch (_) { status('URL выглядит некорректно.'); return; }
+    stopPlayer();
+    startAt = performance.now(); firstPlayingLogged = false;
+    status('Загружаю Amazon IVS Player SDK…');
+    if (!window.IVSPlayer) {
+      log('SDK_MISSING');
+      status('SDK не загрузился. Проверь соединение/CDN и обнови страницу.');
+      return;
+    }
+    const IVSPlayer = window.IVSPlayer;
+    if (!IVSPlayer.isPlayerSupported) {
+      status('Этот браузер не поддерживает IVS Player.');
+      log('PLAYER_UNSUPPORTED');
+      return;
+    }
+    try {
+      const config = {serviceWorker: {url: '/amazon-ivs-service-worker-loader.js'}};
+      player = IVSPlayer.create(config);
+      player.attachHTMLVideoElement(video);
+      player.addEventListener(IVSPlayer.PlayerState.READY, () => log('PLAYER_STATE_READY'));
+      player.addEventListener(IVSPlayer.PlayerState.BUFFERING, () => log('PLAYER_STATE_BUFFERING'));
+      player.addEventListener(IVSPlayer.PlayerState.PLAYING, () => log('PLAYER_STATE_PLAYING'));
+      player.addEventListener(IVSPlayer.PlayerState.IDLE, () => log('PLAYER_STATE_IDLE'));
+      player.addEventListener(IVSPlayer.PlayerEventType.ERROR, e => {
+        log('PLAYER_ERROR', e && {type:e.type, code:e.code, source:e.source, message:e.message});
+        status('Ошибка IVS Player. Подробности в логе.');
+      });
+      player.load(url);
+      log('PLAYER_LOAD', {urlHost:new URL(url).host, serviceWorker:config.serviceWorker.url});
+      status('Плеер загружает поток. Если видео не стартовало, нажми Play на самом видео.');
+    } catch (e) {
+      log('PLAYER_INIT_ERROR', describeError(e));
+      status('Ошибка инициализации плеера: ' + (e.message || e));
+    }
+  }
+  video.addEventListener('playing', () => {
+    log('VIDEO_PLAYING', {currentTime:video.currentTime, readyState:video.readyState});
+    if (!firstPlayingLogged && startAt) {
+      firstPlayingLogged = true;
+      log('FIRST_PLAYING_MS', Math.round(performance.now() - startAt));
+      status('Видео воспроизводится.');
+    }
+  });
+  for (const ev of ['loadstart','loadedmetadata','canplay','waiting','stalled','suspend','error','pause','ended']) {
+    video.addEventListener(ev, () => {
+      log('VIDEO_' + ev.toUpperCase(), {currentTime:video.currentTime, readyState:video.readyState, networkState:video.networkState, error:video.error ? {code:video.error.code,message:video.error.message} : null});
+    });
+  }
+  $('start').addEventListener('click', startPlayer);
+  $('stop').addEventListener('click', stopPlayer);
+  $('check').addEventListener('click', checkSW);
+  $('copy').addEventListener('click', async () => {
+    try { await navigator.clipboard.writeText(logEl.textContent); status('Лог скопирован.'); }
+    catch(e) { log('CLIPBOARD_ERROR', describeError(e)); status('Не удалось скопировать автоматически — выдели лог вручную.'); }
+  });
+  checkEnvironment();
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.addEventListener('controllerchange', () => log('SW_CONTROLLER_CHANGE', {controlled:!!navigator.serviceWorker.controller}));
+    navigator.serviceWorker.getRegistrations().then(regs => log('SW_EXISTING_REGISTRATIONS', regs.map(r => r.scope))).catch(e => log('SW_LIST_ERROR', describeError(e)));
+  }
+  log('SDK_EXPECTED_VERSION', '1.57.0');
+})();
+</script>
+<script src="https://player.live-video.net/1.57.0/amazon-ivs-player.min.js" onload="document.getElementById('log').textContent += new Date().toLocaleTimeString()+' SDK_SCRIPT_LOADED\\n'" onerror="document.getElementById('log').textContent += new Date().toLocaleTimeString()+' SDK_SCRIPT_LOAD_ERROR\\n'"></script>
+</body>
+</html>
