@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#101318">
+<title>Kick Early Prefetch Lab</title>
+<style>
+:root{color-scheme:dark;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#101318;color:#f3f5f7}
+*{box-sizing:border-box}body{margin:0;padding:18px 13px calc(28px + env(safe-area-inset-bottom));max-width:760px;margin-inline:auto}
+h1{font-size:24px;margin:5px 0 8px}p{color:#bac2cc;line-height:1.45}.card{background:#1a2028;border:1px solid #303946;border-radius:15px;padding:14px;margin:13px 0}
+label{display:block;font-weight:600;margin:12px 0 7px}input,button{font:inherit;border-radius:10px;width:100%;padding:12px;border:1px solid #3b4654}
+input{background:#0f1319;color:#fff}button{background:#e6edf5;color:#101318;font-weight:700;margin-top:9px;cursor:pointer}button.secondary{background:#28313d;color:#f3f5f7}
+#log{white-space:pre-wrap;overflow-wrap:anywhere;font:12px/1.5 ui-monospace,SFMono-Regular,monospace;max-height:48vh;overflow:auto;background:#0d1117;padding:12px;border-radius:10px}
+small{color:#aab4c0}.status{overflow-wrap:anywhere}.warn{color:#ffcc80}
+</style>
+</head>
+<body>
+<h1>Kick · Early Prefetch Lab</h1>
+<p>Изолированный диагностический эксперимент. Получает HLS-плейлист и проверяет поток байтов EXT-X-PREFETCH непосредственно с CDN. Ничего не проксирует через наш сервер, не сохраняет URL и не меняет production-плеер.</p>
+<div class="card">
+<label for="channel">Канал Kick</label>
+<input id="channel" value="maloycser" inputmode="text" autocapitalize="none" autocomplete="off" spellcheck="false">
+<button id="diagnose">1. Проверить плейлист и теги</button>
+<button id="stream" class="secondary">2. Измерить ранние байты prefetch</button>
+<button id="both" class="secondary">Запустить оба теста</button>
+<p id="status" class="status">Готов к тесту. Нужен HTTPS и доступ браузера к Kick CDN.</p>
+<small>Тест читает не более 2 секунд или 1 MiB с одного URL, после чего отменяет запрос. Подписанные URL и содержимое видео в лог не выводятся.</small>
+</div>
+<div class="card"><strong>Результаты</strong><p><button id="copy" class="secondary">Скопировать лог</button><button id="clear" class="secondary">Очистить лог</button></p><pre id="log"></pre></div>
+<script>
+(() => {
+ const $ = id => document.getElementById(id);
+ const logEl = $('log'), statusEl = $('status');
+ let lastMedia = null, busy = false;
+ function log(event, data) {
+   const line = new Date().toLocaleTimeString() + ' ' + event + (data === undefined ? '' : ' ' + JSON.stringify(data));
+   logEl.textContent += line + '\n'; logEl.scrollTop = logEl.scrollHeight;
+ }
+ function status(text) { statusEl.textContent = text; log('STATUS', text); }
+ function safeError(e) { return {name:e && e.name || 'Error', message:String(e && e.message || e).replace(/https?:\/\/[^\s"'<>]+/gi,'[url-redacted]').slice(0,180)}; }
+ function safeHost(url) { try { return new URL(url).host; } catch (_) { return ''; } }
+ function tsSync(bytes) {
+   let hits=0, bestOffset=-1;
+   for(let offset=0;offset<Math.min(188,bytes.length);offset++) {
+     let count=0;
+     for(let p=offset;p<bytes.length;p+=188) { if(bytes[p]===0x47) count++; else break; }
+     if(count>hits){hits=count;bestOffset=offset;}
+   }
+   return {syncOffset:bestOffset, consecutiveSyncBytes:hits, likelyMpegTs:hits>=2};
+ }
+ async function getCurrentMediaPlaylist() {
+   const channel = $('channel').value.trim();
+   if (!/^[A-Za-z0-9_-]{1,50}$/.test(channel)) throw new Error('Укажи имя канала, а не ссылку.');
+   const apiStart=performance.now();
+   const api=await fetch('https://kick.com/api/v2/channels/'+encodeURIComponent(channel),{credentials:'omit',cache:'no-store',headers:{Accept:'application/json'}});
+   log('KICK_API', {status:api.status, elapsedMs:Math.round(performance.now()-apiStart)});
+   if(!api.ok) throw new Error('Kick API HTTP '+api.status);
+   const data=await api.json(), live=data.livestream;
+   if(!live) throw new Error('Канал сейчас офлайн.');
+   const masterUrl=data.playback_url || live.playback_url || (data.stream && data.stream.playback_url);
+   if(typeof masterUrl!=='string' || !masterUrl.startsWith('https://')) throw new Error('Kick не вернул HTTPS playback URL.');
+   const masterStart=performance.now();
+   const masterRes=await fetch(masterUrl,{mode:'cors',credentials:'omit',cache:'no-store',headers:{Accept:'application/vnd.apple.mpegurl, application/x-mpegURL, */*'}});
+   const masterText=await masterRes.text();
+   if(!masterRes.ok || !masterText.includes('#EXTM3U')) throw new Error('Master playlist недоступен: HTTP '+masterRes.status);
+   const masterLines=masterText.split(/\r?\n/).map(x=>x.trim()).filter(Boolean);
+   const variants=[];
+   for(let i=0;i<masterLines.length;i++){
+     if(!masterLines[i].startsWith('#EXT-X-STREAM-INF:')) continue;
+     const uri=masterLines.slice(i+1).find(x=>x && !x.startsWith('#'));
+     if(!uri) continue;
+     const attrs=masterLines[i].slice(masterLines[i].indexOf(':')+1);
+     const res=attrs.match(/(?:^|,)RESOLUTION=(\d+)x(\d+)/);
+     const bw=attrs.match(/(?:^|,)BANDWIDTH=(\d+)/);
+     const child=new URL(uri,masterRes.url || masterUrl);
+     if(!child.search && new URL(masterUrl).search) child.search=new URL(masterUrl).search;
+     variants.push({url:child.href,height:res?Number(res[2]):0,bandwidth:bw?Number(bw[1]):0});
+   }
+   if(!variants.length) {
+     // The API can occasionally return a media playlist directly.
+     const lines=masterLines;
+     if(lines.some(x=>x.startsWith('#EXTINF:'))) return parseMedia(masterRes.url || masterUrl, masterText, channel, 0);
+     throw new Error('В master playlist не найдены варианты качества.');
+   }
+   variants.sort((a,b)=>a.height-b.height || a.bandwidth-b.bandwidth);
+   const chosen=variants.find(v=>v.height===480) || variants.find(v=>v.height===360) || variants[Math.floor((variants.length-1)/2)];
+   log('MASTER_PLAYLIST', {status:masterRes.status, elapsedMs:Math.round(performance.now()-masterStart), variantCount:variants.length, heights:variants.map(v=>v.height||null), selectedHeight:chosen.height||null, host:safeHost(chosen.url)});
+   const mediaStart=performance.now();
+   const mediaRes=await fetch(chosen.url,{mode:'cors',credentials:'omit',cache:'no-store',headers:{Accept:'application/vnd.apple.mpegurl, application/x-mpegURL, */*'}});
+   const mediaText=await mediaRes.text();
+   if(!mediaRes.ok || !mediaText.includes('#EXTM3U')) throw new Error('Media playlist недоступен: HTTP '+mediaRes.status);
+   log('MEDIA_PLAYLIST_FETCH', {status:mediaRes.status,elapsedMs:Math.round(performance.now()-mediaStart),bytes:mediaText.length,host:safeHost(mediaRes.url||chosen.url)});
+   return parseMedia(mediaRes.url || chosen.url,mediaText,channel,chosen.height);
+ }
+ function parseMedia(baseUrl,text,channel,height) {
+   const lines=text.split(/\r?\n/).map(x=>x.trim()).filter(Boolean);
+   const regular=[];
+   let pendingDuration=null;
+   const prefetch=[];
+   for(const line of lines){
+     if(line.startsWith('#EXTINF:')) pendingDuration=Number((line.split(':')[1]||'').split(',')[0]);
+     else if(line.startsWith('#EXT-X-PREFETCH:')) {
+       const uri=line.slice(line.indexOf(':')+1).trim().replace(/^"|"$/g,'');
+       if(uri) prefetch.push({url:new URL(uri,baseUrl).href});
+     } else if(line.startsWith('#EXT-X-PART:')) {
+       prefetch.push({url:null,part:true});
+     } else if(line && !line.startsWith('#') && pendingDuration!==null) {
+       regular.push({url:new URL(line,baseUrl).href,duration:pendingDuration}); pendingDuration=null;
+     }
+   }
+   const out={channel,height:height||null,playlistHost:safeHost(baseUrl),targetDuration:(lines.find(x=>x.startsWith('#EXT-X-TARGETDURATION:'))||'').split(':')[1]||null,mediaSequence:(lines.find(x=>x.startsWith('#EXT-X-MEDIA-SEQUENCE:'))||'').split(':')[1]||null,regularSegments:regular.length,prefetchEntries:prefetch.filter(x=>x.url).length,partEntries:lines.filter(x=>x.startsWith('#EXT-X-PART:')).length,preloadHintEntries:lines.filter(x=>x.startsWith('#EXT-X-PRELOAD-HINT:')).length,tagNames:[...new Set(lines.filter(x=>x.startsWith('#')).map(x=>x.split(':')[0]))]};
+   log('PLAYLIST_TAGS',out);
+   lastMedia={baseUrl,regular,prefetch:prefetch.filter(x=>x.url),channel,height,rawTags:out};
+   return lastMedia;
+ }
+ async function readEarlyBytes(url,label,maxMs=1800,maxBytes=1048576) {
+   const started=performance.now(), ctl=new AbortController();
+   const timer=setTimeout(()=>ctl.abort(),maxMs+1000);
+   const out={label,host:safeHost(url)};
+   try {
+     const response=await fetch(url,{mode:'cors',credentials:'omit',cache:'no-store',signal:ctl.signal});
+     out.status=response.status;
+     out.contentType=response.headers.get('content-type');
+     out.headersMs=Math.round(performance.now()-started);
+     out.streamReadable=!!response.body;
+     if(!response.ok) {out.error='HTTP '+response.status;return out;}
+     if(!response.body) return out;
+     const reader=response.body.getReader(), chunks=[], chunkSizes=[];
+     let total=0, firstByteMs=null, timedOut=false, ended=false;
+     while(performance.now()-started<maxMs && total<maxBytes) {
+       const remaining=Math.max(1,maxMs-(performance.now()-started));
+       let timerId;
+       const value=await Promise.race([
+         reader.read(),
+         new Promise(resolve=>{timerId=setTimeout(()=>resolve({timeout:true}),remaining);})
+       ]);
+       clearTimeout(timerId);
+       if(value.timeout){timedOut=true;break;}
+       if(value.done){ended=true;break;}
+       const bytes=value.value;
+       if(firstByteMs===null) firstByteMs=Math.round(performance.now()-started);
+       total+=bytes.byteLength;chunkSizes.push(bytes.byteLength);
+       const copy=bytes.slice(0,Math.min(bytes.byteLength,Math.max(0,maxBytes-(total-bytes.byteLength))));
+       chunks.push(copy);
+     }
+     const joined=new Uint8Array(Math.min(total,maxBytes));let offset=0;
+     for(const chunk of chunks){const n=Math.min(chunk.length,joined.length-offset);if(n<=0)break;joined.set(chunk.subarray(0,n),offset);offset+=n;}
+     out.firstByteMs=firstByteMs;out.bytesRead=joined.length;out.chunks=chunkSizes.length;out.firstChunkBytes=chunkSizes[0]||0;out.chunkSizes=chunkSizes.slice(0,8);out.elapsedMs=Math.round(performance.now()-started);out.readWindowEnded=timedOut;out.responseEnded=ended;out.tsSync=tsSync(joined);
+     try{await reader.cancel('diagnostic early read complete');}catch(_){}
+     return out;
+   } catch(e) {out.error=safeError(e);return out;}
+   finally {clearTimeout(timer);ctl.abort();}
+ }
+ async function diagnose() {
+   if(busy)return;busy=true;$('diagnose').disabled=$('stream').disabled=$('both').disabled=true;
+   try{
+     status('Получаю плейлист напрямую с Kick CDN…');
+     lastMedia=await getCurrentMediaPlaylist();
+     log('PLAYER_CAPABILITIES',{userAgent:navigator.userAgent,secureContext:isSecureContext,managedMediaSource:typeof ManagedMediaSource,mediaSource:typeof MediaSource,tsMimeSupported:typeof MediaSource!=='undefined'?MediaSource.isTypeSupported('video/mp2t'):null,fmp4AvcAacSupported:typeof MediaSource!=='undefined'?MediaSource.isTypeSupported('video/mp4; codecs="avc1.42E01E, mp4a.40.2"'):null});
+     status('Диагностика плейлиста завершена.');
+   }catch(e){log('DIAGNOSE_ERROR',safeError(e));status('Ошибка диагностики. Смотри лог.');}
+   finally{busy=false;$('diagnose').disabled=$('stream').disabled=$('both').disabled=false;}
+ }
+ async function streamTest() {
+   if(busy)return;busy=true;$('diagnose').disabled=$('stream').disabled=$('both').disabled=true;
+   try{
+     if(!lastMedia) lastMedia=await getCurrentMediaPlaylist();
+     if(!lastMedia.prefetch.length) {log('PREFETCH_UNAVAILABLE',{message:'В текущем плейлисте нет EXT-X-PREFETCH; повтори тест через несколько секунд.'});status('В текущем плейлисте нет prefetch. Попробуй ещё раз через несколько секунд.');return;}
+     const item=lastMedia.prefetch[0];
+     status('Читаю первые байты prefetch напрямую с CDN…');
+     const prefetchResult=await readEarlyBytes(item.url,'EXT-X-PREFETCH');
+     log('PREFETCH_EARLY_READ',prefetchResult);
+     if(lastMedia.regular.length) {
+       const regularResult=await readEarlyBytes(lastMedia.regular[0].url,'EXTINF_COMPLETE_SEGMENT',1200,262144);
+       log('REGULAR_SEGMENT_READ',regularResult);
+     }
+     log('EARLY_READ_COMPARISON',{prefetchFirstByteMs:prefetchResult.firstByteMs??null,regularFirstByteMs:null,prefetchBytes:prefetchResult.bytesRead||0,conclusion:'This is a network/byte-arrival test, not proof that these bytes are decodable video frames.'});
+     status('Тест ранних байтов завершён. Скопируй лог и пришли его.');
+   }catch(e){log('STREAM_TEST_ERROR',safeError(e));status('Ошибка чтения prefetch. Смотри лог.');}
+   finally{busy=false;$('diagnose').disabled=$('stream').disabled=$('both').disabled=false;}
+ }
+ $('diagnose').addEventListener('click',diagnose);
+ $('stream').addEventListener('click',streamTest);
+ $('both').addEventListener('click',async()=>{await diagnose();await streamTest();});
+ $('copy').addEventListener('click',async()=>{try{await navigator.clipboard.writeText(logEl.textContent);status('Лог скопирован.');}catch(e){log('COPY_FAILED',safeError(e));status('Не удалось скопировать автоматически: выдели лог вручную.');}});
+ $('clear').addEventListener('click',()=>{logEl.textContent='';status('Лог очищен.');});
+ log('LAB_READY',{origin:location.origin,secureContext:isSecureContext,userAgent:navigator.userAgent});
+})();
+</script>
+</body>
+</html>
