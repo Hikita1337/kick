@@ -30,7 +30,8 @@ small{color:#aab4c0}.warn{color:#ffcc80}
 <script>
 (() => {
  const $=id=>document.getElementById(id), video=$('video'), logEl=$('log');
- let player=null, loaderInstance=null, runId=0, startedAt=0, firstData=false, firstFrame=false, snapshotTimer=null, lastFrameCallbackAt=null, lastFrameMediaTime=null, lastFrameGapLogAt=0, recordingStream=null, mediaRecorder=null, recordedChunks=[], clockTimer=null, testStartedWall=null;
+ let player=null, loaderInstance=null, runId=0, startedAt=0, firstData=false, firstFrame=false, snapshotTimer=null, lastFrameCallbackAt=null, lastFrameMediaTime=null, lastFrameGapLogAt=0, recordingStream=null, mediaRecorder=null, recordedChunks=[], clockTimer=null, testStartedWall=null; pauseStartedAt=null, ignorePauseUntil=0, liveResyncInProgress=false;
+  const LONG_PAUSE_RESYNC_MS=8000;
  function log(name,data){logEl.textContent+=new Date().toLocaleTimeString()+' '+name+(data===undefined?'':' '+JSON.stringify(data))+'\n';logEl.scrollTop=logEl.scrollHeight}
  function status(s){$('status').textContent=s;log('STATUS',s)}
  function err(e){return {name:e&&e.name||'Error',message:String(e&&e.message||e).replace(/https?:\/\/[^\s"'<>]+/gi,'[url-redacted]').slice(0,180)}}
@@ -43,6 +44,8 @@ small{color:#aab4c0}.warn{color:#ffcc80}
  for(const event of ['loadedmetadata','playing','waiting','stalled','error','emptied','abort','ended']){
    video.addEventListener(event,()=>{log('VIDEO_'+event.toUpperCase(),{currentTime:Number(video.currentTime.toFixed(3)),readyState:video.readyState,networkState:video.networkState,error:video.error?{code:video.error.code,message:video.error.message}:null});if(event==='playing'&&!firstFrame){firstFrame=true;log('FIRST_PLAYING_EVENT',{elapsedMs:Math.round(performance.now()-startedAt)});status('Видео воспроизводится. Проверьте задержку и стабильность.')}});
  }
+  video.addEventListener('pause',()=>{if(performance.now()<ignorePauseUntil||!player||video.ended)return;pauseStartedAt=performance.now();log('USER_PAUSE_TRACKED',{currentTime:Number(video.currentTime.toFixed(3)),thresholdMs:LONG_PAUSE_RESYNC_MS});});
+  video.addEventListener('play',()=>{if(!pauseStartedAt||liveResyncInProgress||!player)return;const pausedFor=Math.round(performance.now()-pauseStartedAt);if(pausedFor<LONG_PAUSE_RESYNC_MS){log('RESUME_WITHOUT_RESYNC',{pausedForMs:pausedFor});pauseStartedAt=null;return;}pauseStartedAt=null;liveResyncInProgress=true;log('LIVE_RESYNC_START',{reason:'long_pause',pausedForMs:pausedFor});status('Долгая пауза — подключаюсь к актуальному live…');start({resumePlayback:true,reason:'long_pause'}).finally(()=>{liveResyncInProgress=false;});});
   function parsePlaylist(text,base){
    const lines=text.split(/\r?\n/).map(x=>x.trim()).filter(Boolean), regular=[],prefetch=[];let duration=null;
    for(const line of lines){
@@ -232,14 +235,15 @@ small{color:#aab4c0}.warn{color:#ffcc80}
    abort(){this._cancelled=true;this._status=4;try{this._controller&&this._controller.abort()}catch(_){}try{this._playlistController&&this._playlistController.abort()}catch(_){}clearTimeout(this._pollTimer);this._queue=[]}
    destroy(){this.abort();this._onDataArrival=this._onError=this._onComplete=this._onContentLengthKnown=this._onURLRedirect=null;this._status=0}
  }
- function stop(){
-   runId++;if(snapshotTimer!==null){clearInterval(snapshotTimer);snapshotTimer=null}try{if(player){player.pause();player.unload();player.detachMediaElement();player.destroy()}}catch(e){log('PLAYER_DESTROY_ERROR',err(e))}
+ function stop(options={}){
+   runId++;pauseStartedAt=null;ignorePauseUntil=performance.now()+1500;if(snapshotTimer!==null){clearInterval(snapshotTimer);snapshotTimer=null}try{if(player){player.pause();player.unload();player.detachMediaElement();player.destroy()}}catch(e){log('PLAYER_DESTROY_ERROR',err(e))}
    player=null;loaderInstance=null;
    try{video.pause();video.removeAttribute('src');video.load()}catch(_){}
-   firstData=false;firstFrame=false;status('Остановлено.');
+   firstData=false;firstFrame=false;if(!options.silent)status('Остановлено.');
  }
- async function start(){
-   stop();const thisRun=runId;startedAt=performance.now();firstData=false;firstFrame=false;
+ async function start(options={}){
+   const resumePlayback=!!options.resumePlayback,reason=options.reason||'manual';
+   stop({silent:resumePlayback});const thisRun=runId;startedAt=performance.now();firstData=false;firstFrame=false;
    const channel=$('channel').value.trim();if(!/^[A-Za-z0-9_-]{1,50}$/.test(channel)){status('Неверное имя канала');return}
    if(!window.mpegts||!mpegts.isSupported()){status('mpegts.js/MSE не поддерживается в этом браузере');log('CAPABILITIES',{mpegts:!!window.mpegts,isSupported:!!window.mpegts&&mpegts.isSupported(),mediaSource:typeof MediaSource,managedMediaSource:typeof ManagedMediaSource,userAgent:navigator.userAgent});return}
    log('CAPABILITIES',{mpegtsVersion:mpegts.version||null,isSupported:mpegts.isSupported(),mediaSource:typeof MediaSource,managedMediaSource:typeof ManagedMediaSource,secureContext:isSecureContext,userAgent:navigator.userAgent});
@@ -259,8 +263,9 @@ small{color:#aab4c0}.warn{color:#ffcc80}
        const frame=(now,metadata)=>{if(runId!==thisRun)return;const mediaTime=metadata&&Number.isFinite(metadata.mediaTime)?metadata.mediaTime:video.currentTime;if(lastFrameCallbackAt!==null){const gapMs=now-lastFrameCallbackAt;const mediaDelta=lastFrameMediaTime===null?null:mediaTime-lastFrameMediaTime;if(gapMs>=100&&now-lastFrameGapLogAt>=750){lastFrameGapLogAt=now;log('VIDEO_FRAME_GAP',{gapMs:Math.round(gapMs),mediaDeltaSeconds:mediaDelta===null?null:Number(mediaDelta.toFixed(3)),presentedFrames:metadata&&Number.isFinite(metadata.presentedFrames)?metadata.presentedFrames:null,processingDuration:metadata&&Number.isFinite(metadata.processingDuration)?metadata.processingDuration:null})}}lastFrameCallbackAt=now;lastFrameMediaTime=mediaTime;if(!firstFrame&&video.videoWidth>0){firstFrame=true;log('FIRST_VIDEO_FRAME_CALLBACK',{elapsedMs:Math.round(performance.now()-startedAt),mediaTime:video.currentTime});}video.requestVideoFrameCallback(frame)};
        lastFrameCallbackAt=null;lastFrameMediaTime=null;lastFrameGapLogAt=0;video.requestVideoFrameCallback(frame);
      }
-     status('Загрузчик запущен. Нажми Play, если Safari не начал воспроизведение.');
+     status(resumePlayback?'Live-загрузчик перезапущен. Возобновляю воспроизведение…':'Загрузчик запущен. Нажми Play, если Safari не начал воспроизведение.');
      snapshotTimer=setInterval(()=>{if(runId===thisRun&&player)reportBuffer()},5000);
+      if(resumePlayback){log('LIVE_RESYNC_REBUILT',{reason,elapsedMs:Math.round(performance.now()-startedAt)});try{await video.play();log('LIVE_RESYNC_PLAY_ACCEPTED',{paused:video.paused,readyState:video.readyState})}catch(e){log('LIVE_RESYNC_PLAY_REJECTED',err(e));status('Поток обновлён. Нажми Play ещё раз, если Safari не начал воспроизведение.')}}
    }catch(e){log('START_ERROR',err(e));status('Не удалось запустить. Смотри лог.')}
  }
  function updateTestClock(){
