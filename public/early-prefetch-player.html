@@ -197,8 +197,13 @@ small{color:#aab4c0}.warn{color:#ffcc80}
              }
            }
            const totalDelivered=this._deliveredByUrl.get(item.key)||0;
-           if(!item.prefetch||(contentLength!==null&&received>=contentLength)){this._completeByUrl.add(item.key);this._attemptsByUrl.delete(item.key);}
-           else log('PREFETCH_RESPONSE_ENDED',{host:host(item.url),bytesThisResponse:received,totalBytesDelivered:totalDelivered,contentLength,willResumeIfPublishedAsRegular:true});
+           if(!item.prefetch&&received===0){
+             // A 200 response may ignore Range; if every returned byte was skipped, this is NOT proof
+             // that the live segment is complete. Leave it eligible for the next playlist poll.
+             log('SEGMENT_NO_PROGRESS',{kind:'regular',resumeOffset:item.offset||0,status:response.status,contentLength});
+           }
+           if((!item.prefetch&&received>0)||(contentLength!==null&&received>=contentLength)){this._completeByUrl.add(item.key);this._attemptsByUrl.delete(item.key);}
+           else if(item.prefetch)log('PREFETCH_RESPONSE_ENDED',{host:host(item.url),bytesThisResponse:received,totalBytesDelivered:totalDelivered,contentLength,willResumeIfPublishedAsRegular:true});
            log('SEGMENT_END',{kind:item.prefetch?'prefetch':'regular',bytes:received,elapsedMs:Math.round(performance.now()-start)});
          }catch(e){
            if(!this._cancelled){
