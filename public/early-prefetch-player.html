@@ -53,9 +53,29 @@ small{color:#aab4c0}.warn{color:#ffcc80}
    }
    return {lines,regular,prefetch,targetDuration:Number((lines.find(x=>x.startsWith('#EXT-X-TARGETDURATION:'))||'').split(':')[1]||6),mediaSequence:(lines.find(x=>x.startsWith('#EXT-X-MEDIA-SEQUENCE:'))||'').split(':')[1]||null};
  }
- async function getMediaPlaylist(channel,signal){
+ const RESOLVE_CACHE_TTL_MS=4*60*1000;
+ let resolvedPlaylistCache=null;
+ async function getMediaPlaylist(channel,signal,forceResolve=false){
    let stage='kick_api', started=performance.now();
    const step=(name,extra={})=>log('NETWORK_STAGE',{stage:name,elapsedMs:Math.round(performance.now()-started),...extra});
+   const fetchMedia=async(selected,fromCache)=>{
+     stage='media_playlist';started=performance.now();step(stage,{event:'begin',host:host(selected.url),selectedHeight:selected.height||null,fromCache});
+     const response=await fetch(selected.url,{mode:'cors',credentials:'omit',cache:'no-store',signal,headers:{Accept:'application/vnd.apple.mpegurl, application/x-mpegURL, */*'}});
+     step(stage,{event:'response',status:response.status,ok:response.ok,host:host(response.url||selected.url),fromCache});
+     const text=await response.text();
+     if(!response.ok||!text.includes('#EXTM3U'))throw new Error('Media playlist HTTP '+response.status);
+     log('PLAYLIST_FETCH',{status:response.status,host:host(response.url||selected.url),selectedHeight:selected.height||null,bytes:text.length,fromCache});
+     return {url:response.url||selected.url,text};
+   };
+   if(!forceResolve&&resolvedPlaylistCache&&resolvedPlaylistCache.channel===channel&&Date.now()-resolvedPlaylistCache.createdAt<RESOLVE_CACHE_TTL_MS){
+     try{
+       log('RESOLVER_CACHE_HIT',{ageMs:Date.now()-resolvedPlaylistCache.createdAt,ttlMs:RESOLVE_CACHE_TTL_MS});
+       return await fetchMedia(resolvedPlaylistCache.selected,true);
+     }catch(e){
+       resolvedPlaylistCache=null;
+       log('RESOLVER_CACHE_INVALIDATED',{reason:err(e)});
+     }
+   }
    try{
      step(stage,{event:'begin',channel});
      const api=await fetch('https://kick.com/api/v2/channels/'+encodeURIComponent(channel),{credentials:'omit',cache:'no-store',signal,headers:{Accept:'application/json'}});
@@ -75,12 +95,8 @@ small{color:#aab4c0}.warn{color:#ffcc80}
      const selected=resolved.preferred||variants.find(v=>v.height===480)||variants.find(v=>v.height===720)||variants.find(v=>v.height===360)||variants[0];
      log('RESOLVER_RESPONSE',{status:rr.status,variantCount:variants.length,variants:variants.map(v=>v.label||((v.height||'?')+'p')),selected:selected?selected.label||((selected.height||'?')+'p'):null});
      if(!selected||typeof selected.url!=='string'||!selected.url.startsWith('https://'))throw new Error('Resolver не вернул безопасный URL варианта');
-     stage='media_playlist';started=performance.now();step(stage,{event:'begin',host:host(selected.url),selectedHeight:selected.height||null});
-     const response=await fetch(selected.url,{mode:'cors',credentials:'omit',cache:'no-store',signal,headers:{Accept:'application/vnd.apple.mpegurl, application/x-mpegURL, */*'}});
-     step(stage,{event:'response',status:response.status,ok:response.ok,host:host(response.url||selected.url)});
-     const text=await response.text();if(!response.ok||!text.includes('#EXTM3U'))throw new Error('Media playlist HTTP '+response.status);
-     log('PLAYLIST_FETCH',{status:response.status,host:host(response.url||selected.url),selectedHeight:selected.height||null,bytes:text.length});
-     return {url:response.url||selected.url,text};
+     resolvedPlaylistCache={channel,selected,createdAt:Date.now()};
+     try{return await fetchMedia(selected,false)}catch(e){resolvedPlaylistCache=null;throw e}
    }catch(e){
      log('PLAYLIST_STAGE_ERROR',{stage,...err(e)});
      if(e&&e.name==='TypeError'&&String(e.message)==='Load failed')throw new Error('Fetch failed at stage: '+stage+' (iOS Safari usually hides the underlying network/CORS reason)');
@@ -112,7 +128,7 @@ small{color:#aab4c0}.warn{color:#ffcc80}
        try{
          const p=await getMediaPlaylist(this._channel,this._playlistController.signal);
          const parsed=parsePlaylist(p.text,p.url);
-         const tags={targetDuration:parsed.targetDuration,mediaSequence:parsed.mediaSequence,regularSegments:parsed.regular.length,prefetchEntries:parsed.prefetch.length};
+         this._targetDuration=Number.isFinite(parsed.targetDuration)&&parsed.targetDuration>0?parsed.targetDuration:6;const tags={targetDuration:this._targetDuration,mediaSequence:parsed.mediaSequence,regularSegments:parsed.regular.length,prefetchEntries:parsed.prefetch.length,queued:this._queue.length};
          log('PLAYLIST_STATE',tags);
          if(parsed.mediaSequence!==this._lastSequence){this._lastSequence=parsed.mediaSequence}
          // Begin near the live edge; queue the newest complete segment first, then early prefetch URLs.
@@ -144,7 +160,7 @@ small{color:#aab4c0}.warn{color:#ffcc80}
          this._pumpQueue();
        }catch(e){if(!this._cancelled){log('PLAYLIST_POLL_ERROR',err(e));}}
        finally{this._pollBusy=false}
-       await new Promise(resolve=>{this._pollTimer=setTimeout(resolve,Math.max(400,Math.min(1000,(this._targetDuration||6)*250)))});
+       await new Promise(resolve=>{this._pollTimer=setTimeout(resolve,Math.max(500,Math.min(1000,(this._targetDuration||6)*250)))});
      }
    }
    async _pumpQueue(){
