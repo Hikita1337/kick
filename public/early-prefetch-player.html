@@ -53,9 +53,29 @@ small{color:#aab4c0}.warn{color:#ffcc80}
    }
    return {lines,regular,prefetch,targetDuration:Number((lines.find(x=>x.startsWith('#EXT-X-TARGETDURATION:'))||'').split(':')[1]||6),mediaSequence:(lines.find(x=>x.startsWith('#EXT-X-MEDIA-SEQUENCE:'))||'').split(':')[1]||null};
  }
- async function getMediaPlaylist(channel,signal){
+ const RESOLVE_CACHE_TTL_MS=4*60*1000;
+ let resolvedPlaylistCache=null;
+ async function getMediaPlaylist(channel,signal,forceResolve=false){
    let stage='kick_api', started=performance.now();
    const step=(name,extra={})=>log('NETWORK_STAGE',{stage:name,elapsedMs:Math.round(performance.now()-started),...extra});
+   const fetchMedia=async(selected,fromCache)=>{
+     stage='media_playlist';started=performance.now();step(stage,{event:'begin',host:host(selected.url),selectedHeight:selected.height||null,fromCache});
+     const response=await fetch(selected.url,{mode:'cors',credentials:'omit',cache:'no-store',signal,headers:{Accept:'application/vnd.apple.mpegurl, application/x-mpegURL, */*'}});
+     step(stage,{event:'response',status:response.status,ok:response.ok,host:host(response.url||selected.url),fromCache});
+     const text=await response.text();
+     if(!response.ok||!text.includes('#EXTM3U'))throw new Error('Media playlist HTTP '+response.status);
+     log('PLAYLIST_FETCH',{status:response.status,host:host(response.url||selected.url),selectedHeight:selected.height||null,bytes:text.length,fromCache});
+     return {url:response.url||selected.url,text};
+   };
+   if(!forceResolve&&resolvedPlaylistCache&&resolvedPlaylistCache.channel===channel&&Date.now()-resolvedPlaylistCache.createdAt<RESOLVE_CACHE_TTL_MS){
+     try{
+       log('RESOLVER_CACHE_HIT',{ageMs:Date.now()-resolvedPlaylistCache.createdAt,ttlMs:RESOLVE_CACHE_TTL_MS});
+       return await fetchMedia(resolvedPlaylistCache.selected,true);
+     }catch(e){
+       resolvedPlaylistCache=null;
+       log('RESOLVER_CACHE_INVALIDATED',{reason:err(e)});
+     }
+   }
    try{
      step(stage,{event:'begin',channel});
      const api=await fetch('https://kick.com/api/v2/channels/'+encodeURIComponent(channel),{credentials:'omit',cache:'no-store',signal,headers:{Accept:'application/json'}});
@@ -75,12 +95,8 @@ small{color:#aab4c0}.warn{color:#ffcc80}
      const selected=resolved.preferred||variants.find(v=>v.height===480)||variants.find(v=>v.height===720)||variants.find(v=>v.height===360)||variants[0];
      log('RESOLVER_RESPONSE',{status:rr.status,variantCount:variants.length,variants:variants.map(v=>v.label||((v.height||'?')+'p')),selected:selected?selected.label||((selected.height||'?')+'p'):null});
      if(!selected||typeof selected.url!=='string'||!selected.url.startsWith('https://'))throw new Error('Resolver не вернул безопасный URL варианта');
-     stage='media_playlist';started=performance.now();step(stage,{event:'begin',host:host(selected.url),selectedHeight:selected.height||null});
-     const response=await fetch(selected.url,{mode:'cors',credentials:'omit',cache:'no-store',signal,headers:{Accept:'application/vnd.apple.mpegurl, application/x-mpegURL, */*'}});
-     step(stage,{event:'response',status:response.status,ok:response.ok,host:host(response.url||selected.url)});
-     const text=await response.text();if(!response.ok||!text.includes('#EXTM3U'))throw new Error('Media playlist HTTP '+response.status);
-     log('PLAYLIST_FETCH',{status:response.status,host:host(response.url||selected.url),selectedHeight:selected.height||null,bytes:text.length});
-     return {url:response.url||selected.url,text};
+     resolvedPlaylistCache={channel,selected,createdAt:Date.now()};
+     try{return await fetchMedia(selected,false)}catch(e){resolvedPlaylistCache=null;throw e}
    }catch(e){
      log('PLAYLIST_STAGE_ERROR',{stage,...err(e)});
      if(e&&e.name==='TypeError'&&String(e.message)==='Load failed')throw new Error('Fetch failed at stage: '+stage+' (iOS Safari usually hides the underlying network/CORS reason)');
@@ -91,9 +107,10 @@ small{color:#aab4c0}.warn{color:#ffcc80}
    constructor(seekHandler,config){
      this._type='kick-early-prefetch';this._status=0;this._needStash=false;
      this._onContentLengthKnown=null;this._onURLRedirect=null;this._onDataArrival=null;this._onError=null;this._onComplete=null;
-     this._controller=null;this._playlistController=null;this._cancelled=false;this._received=0;this._queue=[];this._seen=new Set();this._active=new Map();this._deliveredByUrl=new Map();this._completeByUrl=new Set();this._pumpBusy=false;this._pollBusy=false;this._run=runId;this._channel=$('channel').value.trim();this._lastSequence=null;
+     this._controller=null;this._playlistController=null;this._cancelled=false;this._received=0;this._queue=[];this._seen=new Set();this._active=new Map();this._deliveredByUrl=new Map();this._completeByUrl=new Set();this._attemptsByUrl=new Map();this._maxSegmentRetries=2;this._pumpBusy=false;this._pollBusy=false;this._run=runId;this._channel=$('channel').value.trim();this._lastSequence=null;
    }
    _key(url){try{const u=new URL(url);return u.origin+u.pathname}catch(_){return url}}
+   _enqueue(item,priority=false){item.key=item.key||this._key(item.url);if(this._active.has(item.key)||this._queue.some(x=>x.key===item.key))return false;if(priority||!item.prefetch)this._queue.unshift(item);else this._queue.push(item);return true;}
    get type(){return this._type} get status(){return this._status} get needStashBuffer(){return false}
    get onContentLengthKnown(){return this._onContentLengthKnown} set onContentLengthKnown(v){this._onContentLengthKnown=v}
    get onURLRedirect(){return this._onURLRedirect} set onURLRedirect(v){this._onURLRedirect=v}
@@ -112,7 +129,7 @@ small{color:#aab4c0}.warn{color:#ffcc80}
        try{
          const p=await getMediaPlaylist(this._channel,this._playlistController.signal);
          const parsed=parsePlaylist(p.text,p.url);
-         const tags={targetDuration:parsed.targetDuration,mediaSequence:parsed.mediaSequence,regularSegments:parsed.regular.length,prefetchEntries:parsed.prefetch.length};
+         this._targetDuration=Number.isFinite(parsed.targetDuration)&&parsed.targetDuration>0?parsed.targetDuration:6;const tags={targetDuration:this._targetDuration,mediaSequence:parsed.mediaSequence,regularSegments:parsed.regular.length,prefetchEntries:parsed.prefetch.length,queued:this._queue.length};
          log('PLAYLIST_STATE',tags);
          if(parsed.mediaSequence!==this._lastSequence){this._lastSequence=parsed.mediaSequence}
          // Begin near the live edge; queue the newest complete segment first, then early prefetch URLs.
@@ -122,21 +139,24 @@ small{color:#aab4c0}.warn{color:#ffcc80}
            const newest=parsed.regular.slice(-1).map(x=>x.url);
            for(const url of newest.concat(parsed.prefetch)){
              const key=this._key(url);if(this._seen.has(key))continue;
-             this._seen.add(key);this._queue.push({url,key,prefetch:parsed.prefetch.some(p=>this._key(p)===key),offset:0});
+             this._seen.add(key);this._enqueue({url,key,prefetch:parsed.prefetch.some(p=>this._key(p)===key),offset:0});
            }
          } else {
            for(const seg of parsed.regular.slice(-3)){
              const key=this._key(seg.url);if(this._completeByUrl.has(key))continue;
              if(this._active.has(key)||this._queue.some(x=>x.key===key))continue;
              if(!this._seen.has(key)){
-               this._seen.add(key);this._queue.push({url:seg.url,key,prefetch:false,offset:0});
-             } else if((this._deliveredByUrl.get(key)||0)>0){
-               this._queue.push({url:seg.url,key,prefetch:false,offset:this._deliveredByUrl.get(key),resume:true});
+               this._seen.add(key);this._enqueue({url:seg.url,key,prefetch:false,offset:this._deliveredByUrl.get(key)||0,attempt:(this._attemptsByUrl.get(key)||0)},true);
+             } else if((this._deliveredByUrl.get(key)||0)>0&&(this._attemptsByUrl.get(key)||0)<this._maxSegmentRetries){
+               this._enqueue({url:seg.url,key,prefetch:false,offset:this._deliveredByUrl.get(key),resume:true,attempt:(this._attemptsByUrl.get(key)||0)},true);
+             } else if((this._attemptsByUrl.get(key)||0)<this._maxSegmentRetries&&!this._completeByUrl.has(key)){
+               // A prefetch may fail before delivering bytes. Promote it when it becomes a regular segment.
+               this._enqueue({url:seg.url,key,prefetch:false,offset:0,attempt:(this._attemptsByUrl.get(key)||0)},true);
              }
            }
            for(const url of parsed.prefetch){
              const key=this._key(url);if(this._seen.has(key))continue;
-             this._seen.add(key);this._queue.push({url,key,prefetch:true,offset:0});
+             this._seen.add(key);this._enqueue({url,key,prefetch:true,offset:this._deliveredByUrl.get(key)||0});
            }
          }
          initial=false;
@@ -144,7 +164,7 @@ small{color:#aab4c0}.warn{color:#ffcc80}
          this._pumpQueue();
        }catch(e){if(!this._cancelled){log('PLAYLIST_POLL_ERROR',err(e));}}
        finally{this._pollBusy=false}
-       await new Promise(resolve=>{this._pollTimer=setTimeout(resolve,Math.max(400,Math.min(1000,(this._targetDuration||6)*250)))});
+       await new Promise(resolve=>{this._pollTimer=setTimeout(resolve,Math.max(500,Math.min(1000,(this._targetDuration||6)*250)))});
      }
    }
    async _pumpQueue(){
@@ -176,11 +196,26 @@ small{color:#aab4c0}.warn{color:#ffcc80}
              }
            }
            const totalDelivered=this._deliveredByUrl.get(item.key)||0;
-           if(!item.prefetch||(contentLength!==null&&received>=contentLength))this._completeByUrl.add(item.key);
+           if(!item.prefetch||(contentLength!==null&&received>=contentLength)){this._completeByUrl.add(item.key);this._attemptsByUrl.delete(item.key);}
            else log('PREFETCH_RESPONSE_ENDED',{host:host(item.url),bytesThisResponse:received,totalBytesDelivered:totalDelivered,contentLength,willResumeIfPublishedAsRegular:true});
            log('SEGMENT_END',{kind:item.prefetch?'prefetch':'regular',bytes:received,elapsedMs:Math.round(performance.now()-start)});
-         }catch(e){if(!this._cancelled)log('SEGMENT_ERROR',{kind:item.prefetch?'prefetch':'regular',host:host(item.url),...err(e)})}
-         finally{this._active.delete(item.key)}
+         }catch(e){
+           if(!this._cancelled){
+             const kind=item.prefetch?'prefetch':'regular';log('SEGMENT_ERROR',{kind,host:host(item.url),attempt:(this._attemptsByUrl.get(item.key)||0)+1,resumeOffset:this._deliveredByUrl.get(item.key)||0,...err(e)});
+             // Retry failed regular segments with a strict bound. Speculative prefetch failures
+             // wait until the segment is published as regular media.
+             if(!item.prefetch){
+               const attempts=(this._attemptsByUrl.get(item.key)||0)+1;this._attemptsByUrl.set(item.key,attempts);
+               if(attempts<=this._maxSegmentRetries){
+                 const offset=this._deliveredByUrl.get(item.key)||0;
+                 this._active.delete(item.key);
+                 await new Promise(resolve=>setTimeout(resolve,Math.min(800,200*attempts)));
+                 this._enqueue({url:item.url,key:item.key,prefetch:false,offset,resume:offset>0,attempt:attempts},true);
+                 log('SEGMENT_RETRY_QUEUED',{kind:'regular',attempt:attempts,maxRetries:this._maxSegmentRetries,resumeOffset:offset});
+               }else log('SEGMENT_RETRY_EXHAUSTED',{kind:'regular',attempts,maxRetries:this._maxSegmentRetries});
+             }
+           }
+         }finally{this._active.delete(item.key)}
        }
      }finally{this._pumpBusy=false;if(this._queue.length&&!this._cancelled)this._pumpQueue()}
    }
