@@ -72,6 +72,7 @@ small{color:#aab4c0}.warn{color:#ffcc80}
        log('RESOLVER_CACHE_HIT',{ageMs:Date.now()-resolvedPlaylistCache.createdAt,ttlMs:RESOLVE_CACHE_TTL_MS});
        return await fetchMedia(resolvedPlaylistCache.selected,true);
      }catch(e){
+       if(e&&e.name==='AbortError')throw e;
        resolvedPlaylistCache=null;
        log('RESOLVER_CACHE_INVALIDATED',{reason:err(e)});
      }
