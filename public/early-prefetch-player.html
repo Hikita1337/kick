@@ -107,9 +107,10 @@ small{color:#aab4c0}.warn{color:#ffcc80}
    constructor(seekHandler,config){
      this._type='kick-early-prefetch';this._status=0;this._needStash=false;
      this._onContentLengthKnown=null;this._onURLRedirect=null;this._onDataArrival=null;this._onError=null;this._onComplete=null;
-     this._controller=null;this._playlistController=null;this._cancelled=false;this._received=0;this._queue=[];this._seen=new Set();this._active=new Map();this._deliveredByUrl=new Map();this._completeByUrl=new Set();this._pumpBusy=false;this._pollBusy=false;this._run=runId;this._channel=$('channel').value.trim();this._lastSequence=null;
+     this._controller=null;this._playlistController=null;this._cancelled=false;this._received=0;this._queue=[];this._seen=new Set();this._active=new Map();this._deliveredByUrl=new Map();this._completeByUrl=new Set();this._attemptsByUrl=new Map();this._maxSegmentRetries=2;this._pumpBusy=false;this._pollBusy=false;this._run=runId;this._channel=$('channel').value.trim();this._lastSequence=null;
    }
    _key(url){try{const u=new URL(url);return u.origin+u.pathname}catch(_){return url}}
+   _enqueue(item,priority=false){item.key=item.key||this._key(item.url);if(this._active.has(item.key)||this._queue.some(x=>x.key===item.key))return false;if(priority||!item.prefetch)this._queue.unshift(item);else this._queue.push(item);return true;}
    get type(){return this._type} get status(){return this._status} get needStashBuffer(){return false}
    get onContentLengthKnown(){return this._onContentLengthKnown} set onContentLengthKnown(v){this._onContentLengthKnown=v}
    get onURLRedirect(){return this._onURLRedirect} set onURLRedirect(v){this._onURLRedirect=v}
@@ -138,21 +139,24 @@ small{color:#aab4c0}.warn{color:#ffcc80}
            const newest=parsed.regular.slice(-1).map(x=>x.url);
            for(const url of newest.concat(parsed.prefetch)){
              const key=this._key(url);if(this._seen.has(key))continue;
-             this._seen.add(key);this._queue.push({url,key,prefetch:parsed.prefetch.some(p=>this._key(p)===key),offset:0});
+             this._seen.add(key);this._enqueue({url,key,prefetch:parsed.prefetch.some(p=>this._key(p)===key),offset:0});
            }
          } else {
            for(const seg of parsed.regular.slice(-3)){
              const key=this._key(seg.url);if(this._completeByUrl.has(key))continue;
              if(this._active.has(key)||this._queue.some(x=>x.key===key))continue;
              if(!this._seen.has(key)){
-               this._seen.add(key);this._queue.push({url:seg.url,key,prefetch:false,offset:0});
-             } else if((this._deliveredByUrl.get(key)||0)>0){
-               this._queue.push({url:seg.url,key,prefetch:false,offset:this._deliveredByUrl.get(key),resume:true});
+               this._seen.add(key);this._enqueue({url:seg.url,key,prefetch:false,offset:this._deliveredByUrl.get(key)||0,attempt:(this._attemptsByUrl.get(key)||0)},true);
+             } else if((this._deliveredByUrl.get(key)||0)>0&&(this._attemptsByUrl.get(key)||0)<this._maxSegmentRetries){
+               this._enqueue({url:seg.url,key,prefetch:false,offset:this._deliveredByUrl.get(key),resume:true,attempt:(this._attemptsByUrl.get(key)||0)},true);
+             } else if((this._attemptsByUrl.get(key)||0)<this._maxSegmentRetries&&!this._completeByUrl.has(key)){
+               // A prefetch may fail before delivering bytes. Promote it when it becomes a regular segment.
+               this._enqueue({url:seg.url,key,prefetch:false,offset:0,attempt:(this._attemptsByUrl.get(key)||0)},true);
              }
            }
            for(const url of parsed.prefetch){
              const key=this._key(url);if(this._seen.has(key))continue;
-             this._seen.add(key);this._queue.push({url,key,prefetch:true,offset:0});
+             this._seen.add(key);this._enqueue({url,key,prefetch:true,offset:this._deliveredByUrl.get(key)||0});
            }
          }
          initial=false;
@@ -192,11 +196,26 @@ small{color:#aab4c0}.warn{color:#ffcc80}
              }
            }
            const totalDelivered=this._deliveredByUrl.get(item.key)||0;
-           if(!item.prefetch||(contentLength!==null&&received>=contentLength))this._completeByUrl.add(item.key);
+           if(!item.prefetch||(contentLength!==null&&received>=contentLength)){this._completeByUrl.add(item.key);this._attemptsByUrl.delete(item.key);}
            else log('PREFETCH_RESPONSE_ENDED',{host:host(item.url),bytesThisResponse:received,totalBytesDelivered:totalDelivered,contentLength,willResumeIfPublishedAsRegular:true});
            log('SEGMENT_END',{kind:item.prefetch?'prefetch':'regular',bytes:received,elapsedMs:Math.round(performance.now()-start)});
-         }catch(e){if(!this._cancelled)log('SEGMENT_ERROR',{kind:item.prefetch?'prefetch':'regular',host:host(item.url),...err(e)})}
-         finally{this._active.delete(item.key)}
+         }catch(e){
+           if(!this._cancelled){
+             const kind=item.prefetch?'prefetch':'regular';log('SEGMENT_ERROR',{kind,host:host(item.url),attempt:(this._attemptsByUrl.get(item.key)||0)+1,resumeOffset:this._deliveredByUrl.get(item.key)||0,...err(e)});
+             // Retry failed regular segments with a strict bound. Speculative prefetch failures
+             // wait until the segment is published as regular media.
+             if(!item.prefetch){
+               const attempts=(this._attemptsByUrl.get(item.key)||0)+1;this._attemptsByUrl.set(item.key,attempts);
+               if(attempts<=this._maxSegmentRetries){
+                 const offset=this._deliveredByUrl.get(item.key)||0;
+                 this._active.delete(item.key);
+                 await new Promise(resolve=>setTimeout(resolve,Math.min(800,200*attempts)));
+                 this._enqueue({url:item.url,key:item.key,prefetch:false,offset,resume:offset>0,attempt:attempts},true);
+                 log('SEGMENT_RETRY_QUEUED',{kind:'regular',attempt:attempts,maxRetries:this._maxSegmentRetries,resumeOffset:offset});
+               }else log('SEGMENT_RETRY_EXHAUSTED',{kind:'regular',attempts,maxRetries:this._maxSegmentRetries});
+             }
+           }
+         }finally{this._active.delete(item.key)}
        }
      }finally{this._pumpBusy=false;if(this._queue.length&&!this._cancelled)this._pumpQueue()}
    }
