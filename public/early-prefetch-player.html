@@ -202,8 +202,12 @@ small{color:#aab4c0}.warn{color:#ffcc80}
              // that the live segment is complete. Leave it eligible for the next playlist poll.
              log('SEGMENT_NO_PROGRESS',{kind:'regular',resumeOffset:item.offset||0,status:response.status,contentLength});
            }
-           if((!item.prefetch&&received>0)||(contentLength!==null&&received>=contentLength)){this._completeByUrl.add(item.key);this._attemptsByUrl.delete(item.key);}
-           else if(item.prefetch)log('PREFETCH_RESPONSE_ENDED',{host:host(item.url),bytesThisResponse:received,totalBytesDelivered:totalDelivered,contentLength,willResumeIfPublishedAsRegular:true});
+           // A clean EOF with bytes means this IVS prefetch response has ended at a segment boundary.
+           // Content-Length is commonly absent; do not fetch the same completed TS again as a regular segment.
+           if(received>0){
+             this._completeByUrl.add(item.key);this._attemptsByUrl.delete(item.key);
+             if(item.prefetch)log('PREFETCH_SEGMENT_COMPLETE',{host:host(item.url),bytes:received,totalBytesDelivered:totalDelivered,contentLength});
+           }else if(item.prefetch)log('PREFETCH_RESPONSE_ENDED',{host:host(item.url),bytesThisResponse:received,totalBytesDelivered:totalDelivered,contentLength,willResumeIfPublishedAsRegular:true});
            log('SEGMENT_END',{kind:item.prefetch?'prefetch':'regular',bytes:received,elapsedMs:Math.round(performance.now()-start)});
          }catch(e){
            if(!this._cancelled){
